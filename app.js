@@ -25,6 +25,7 @@ app.listen(PORT, () => {
 
 // Set up AWS SDK
 AWS.config.update({ region: 'us-east-1' });
+const sqs = new AWS.SQS();
 
 const cloudwatch = new AWS.CloudWatch();
 
@@ -71,7 +72,7 @@ async function getSQSAttributes(queueName) {
 
 module.exports = {
   getQueueUrl,
-  getSQSMetrics
+  getSQSAttributes
 };
 // Create a Prometheus Registry
 const register = new client.Registry();
@@ -80,10 +81,9 @@ const register = new client.Registry();
 client.collectDefaultMetrics({ register });
 
 // Define custom metrics for SQS
-const sqsApproximateNumberOfMessagesVisible = {};
-
-const sqsApproximateNumberOfMessagesNotVisible = {};
-const sqsApproximateNumberOfMessagesDelayed = {};
+let sqsApproximateNumberOfMessagesVisible = {};
+let sqsApproximateNumberOfMessagesNotVisible = {};
+let sqsApproximateNumberOfMessagesDelayed = {};
 
 // Initialize custom metrics for each queue and add them to the registry
 const queueNames = process.env.SQS_QUEUES ? process.env.SQS_QUEUES.split(',') : [];
