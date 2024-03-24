@@ -26,11 +26,21 @@ app.listen(PORT, () => {
 });
 
 // Set up AWS SDK
-const awsRegion = 'us-west-2';
-const sqs = new SQSClient({ region: awsRegion, credentials: fromIni({ profile: 'default' }) });
-const cloudwatch = new CloudWatchClient({ region: awsRegion, credentials: fromIni({ profile: 'default' }) });
+const awsProfile = process.env.AWS_PROFILE || 'default';
+const { defaultProvider } = require('@aws-sdk/credential-provider-node');
+const { loadSharedConfigFiles } = require('@aws-sdk/shared-ini-file-loader');
 
-const cloudwatch = new AWS.CloudWatch();
+const awsCredentials = defaultProvider({
+  profile: awsProfile,
+});
+
+// Load the AWS config files and extract the region for the given profile
+const awsConfig = await loadSharedConfigFiles();
+const awsRegion = awsConfig.configFile[awsProfile].region;
+
+const sqs = new SQSClient({ region: awsRegion, credentials: awsCredentials });
+const cloudwatch = new CloudWatchClient({ region: awsRegion, credentials: awsCredentials });
+
 
 // Add code here for handling errors and logging
 async function getQueueUrl(queueName) {
