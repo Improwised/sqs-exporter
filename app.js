@@ -58,9 +58,9 @@ async function getSQSAttributes(queueName) {
     const data = await sqs.getQueueAttributes(params).promise();
 
     // Set the custom metrics with the values from SQS attributes
-    sqsApproximateNumberOfMessagesVisible[queueName].set({queueName}, data.Attributes.ApproximateNumberOfMessagesVisible || 0);
-    sqsApproximateNumberOfMessagesNotVisible[queueName].set({queueName}, data.Attributes.ApproximateNumberOfMessagesNotVisible || 0);
-    sqsApproximateNumberOfMessagesDelayed[queueName].set({queueName}, data.Attributes.ApproximateNumberOfMessagesDelayed || 0);
+    sqsApproximateNumberOfMessagesVisible.set({queueName}, data.Attributes.ApproximateNumberOfMessagesVisible || 0);
+    sqsApproximateNumberOfMessagesNotVisible.set({queueName}, data.Attributes.ApproximateNumberOfMessagesNotVisible || 0);
+    sqsApproximateNumberOfMessagesDelayed.set({queueName}, data.Attributes.ApproximateNumberOfMessagesDelayed || 0);
 
     return data.Attributes; // Keep returning the raw attributes for any other potential use
   } catch (error) {
@@ -89,24 +89,24 @@ const sqsApproximateNumberOfMessagesDelayed = {};
 const queueNames = process.env.SQS_QUEUES ? process.env.SQS_QUEUES.split(',') : [];
 queueNames.forEach(queueName => {
   const sanitizedQueueName = queueName.replace(/[^a-zA-Z0-9_:]/g, '_');
-  sqsApproximateNumberOfMessagesVisible[queueName] = new client.Gauge({
-    name: `sqs_approximate_number_of_messages_visible_${sanitizedQueueName}`,
-    help: `Approximate number of messages visible in the SQS queue ${queueName}`,
+  sqsApproximateNumberOfMessagesVisible = new client.Gauge({
+    name: 'sqs_approximate_number_of_messages_visible',
+    help: 'Approximate number of messages visible in the SQS queue',
     labelNames: ['queueName']
   });
-  sqsApproximateNumberOfMessagesNotVisible[queueName] = new client.Gauge({
-    name: `sqs_approximate_number_of_messages_not_visible_${sanitizedQueueName}`,
-    help: `Approximate number of messages not visible in the SQS queue ${queueName}`,
+  sqsApproximateNumberOfMessagesNotVisible = new client.Gauge({
+    name: 'sqs_approximate_number_of_messages_not_visible',
+    help: 'Approximate number of messages not visible in the SQS queue',
     labelNames: ['queueName']
   });
-  sqsApproximateNumberOfMessagesDelayed[queueName] = new client.Gauge({
-    name: `sqs_approximate_number_of_messages_delayed_${sanitizedQueueName}`,
-    help: `Approximate number of messages delayed in the SQS queue ${queueName}`,
+  sqsApproximateNumberOfMessagesDelayed = new client.Gauge({
+    name: 'sqs_approximate_number_of_messages_delayed',
+    help: 'Approximate number of messages delayed in the SQS queue',
     labelNames: ['queueName']
   });
-  register.registerMetric(sqsApproximateNumberOfMessagesVisible[sanitizedQueueName]);
-  register.registerMetric(sqsApproximateNumberOfMessagesNotVisible[sanitizedQueueName]);
-  register.registerMetric(sqsApproximateNumberOfMessagesDelayed[sanitizedQueueName]);
+  register.registerMetric(sqsApproximateNumberOfMessagesVisible);
+  register.registerMetric(sqsApproximateNumberOfMessagesNotVisible);
+  register.registerMetric(sqsApproximateNumberOfMessagesDelayed);
 });
 
 // Endpoint to serve the metrics
