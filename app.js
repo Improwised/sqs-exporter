@@ -63,9 +63,9 @@ async function getSQSAttributes(queueName) {
     const data = await sqs.send(command);
 
     // Set the custom metrics with the values from SQS attributes
-    sqsApproximateNumberOfMessagesVisible.set({queueName}, data.Attributes.ApproximateNumberOfMessages || 0);
-    sqsApproximateNumberOfMessagesNotVisible.set({queueName}, data.Attributes.ApproximateNumberOfMessagesNotVisible || 0);
-    sqsApproximateNumberOfMessagesDelayed.set({queueName}, data.Attributes.ApproximateNumberOfMessagesDelayed || 0);
+    sqsApproximateNumberOfMessagesVisible.set({queueName}, parseInt(data.Attributes.ApproximateNumberOfMessages) || 0);
+    sqsApproximateNumberOfMessagesNotVisible.set({queueName}, parseInt(data.Attributes.ApproximateNumberOfMessagesNotVisible) || 0);
+    sqsApproximateNumberOfMessagesDelayed.set({queueName}, parseInt(data.Attributes.ApproximateNumberOfMessagesDelayed) || 0);
 
     return data.Attributes; // Keep returning the raw attributes for any other potential use
   } catch (error) {
