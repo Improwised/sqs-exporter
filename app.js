@@ -27,11 +27,8 @@ app.listen(PORT, () => {
 
 // Set up AWS SDK
 const awsProfile = process.env.AWS_PROFILE || 'default';
-const { fromIni } = require('@aws-sdk/credential-provider-ini');
-
 const awsCredentials = fromIni({ profile: awsProfile });
-
-const awsRegion = process.env.AWS_REGION || 'us-east-1'; // Default to 'us-east-1' or use the region from the environment variable
+const awsRegion = process.env.AWS_REGION || 'us-west-2';
 
 const sqs = new SQSClient({ region: awsRegion, credentials: awsCredentials });
 const cloudwatch = new CloudWatchClient({ region: awsRegion, credentials: awsCredentials });
