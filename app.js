@@ -38,6 +38,7 @@ const awsCredentials = defaultProvider({
 let awsRegion;
 (async () => {
   const awsConfig = await loadSharedConfigFiles();
+  console.log(awsConfig.configFile, awsProfile);
   awsRegion = awsConfig.configFile[awsProfile].region;
 })();
 
