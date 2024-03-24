@@ -27,20 +27,11 @@ app.listen(PORT, () => {
 
 // Set up AWS SDK
 const awsProfile = process.env.AWS_PROFILE || 'default';
-const { defaultProvider } = require('@aws-sdk/credential-provider-node');
-const { loadSharedConfigFiles } = require('@aws-sdk/shared-ini-file-loader');
+const { fromIni } = require('@aws-sdk/credential-provider-ini');
 
-const awsCredentials = defaultProvider({
-  profile: awsProfile,
-});
+const awsCredentials = fromIni({ profile: awsProfile });
 
-// Load the AWS config files and extract the region for the given profile
-let awsRegion;
-(async () => {
-  const awsConfig = await loadSharedConfigFiles();
-  console.log(awsConfig.configFile, awsProfile);
-  awsRegion = awsConfig.configFile[awsProfile].region;
-})();
+const awsRegion = process.env.AWS_REGION || 'us-east-1'; // Default to 'us-east-1' or use the region from the environment variable
 
 const sqs = new SQSClient({ region: awsRegion, credentials: awsCredentials });
 const cloudwatch = new CloudWatchClient({ region: awsRegion, credentials: awsCredentials });
