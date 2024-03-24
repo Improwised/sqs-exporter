@@ -32,10 +32,7 @@ const cloudwatch = new AWS.CloudWatch();
 // Add code here for handling errors and logging
 async function getQueueUrl(queueName) {
   try {
-    const params = {
-      QueueName: queueName,
-      AttributeNames: ['QueueArn']
-    };
+    const params = { QueueName: queueName };
     const data = await sqs.getQueueUrl(params).promise();
     return data.QueueUrl;
   } catch (error) {
