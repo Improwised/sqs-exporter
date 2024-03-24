@@ -26,7 +26,7 @@ app.listen(PORT, () => {
 });
 
 // Set up AWS SDK
-const awsRegion = 'us-east-1';
+const awsRegion = 'us-west-2';
 const sqs = new SQSClient({ region: awsRegion, credentials: fromIni({ profile: 'default' }) });
 const cloudwatch = new CloudWatchClient({ region: awsRegion, credentials: fromIni({ profile: 'default' }) });
 
