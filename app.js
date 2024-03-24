@@ -93,18 +93,19 @@ const sqsNumberOfMessagesReceived = {};
 // Initialize custom metrics for each queue and add them to the registry
 const queueNames = process.env.SQS_QUEUES ? process.env.SQS_QUEUES.split(',') : [];
 queueNames.forEach(queueName => {
+  const sanitizedQueueName = queueName.replace(/[^a-zA-Z0-9_:]/g, '_');
   sqsNumberOfMessagesSent[queueName] = new client.Gauge({
-    name: `sqs_number_of_messages_sent_${queueName}`,
+    name: `sqs_number_of_messages_sent_${sanitizedQueueName}`,
     help: `Number of messages sent to the SQS queue ${queueName}`,
     labelNames: ['queueName']
   });
   sqsNumberOfMessagesReceived[queueName] = new client.Gauge({
-    name: `sqs_number_of_messages_received_${queueName}`,
+    name: `sqs_number_of_messages_received_${sanitizedQueueName}`,
     help: `Number of messages received from the SQS queue ${queueName}`,
     labelNames: ['queueName']
   });
-  register.registerMetric(sqsNumberOfMessagesSent[queueName]);
-  register.registerMetric(sqsNumberOfMessagesReceived[queueName]);
+  register.registerMetric(sqsNumberOfMessagesSent[sanitizedQueueName]);
+  register.registerMetric(sqsNumberOfMessagesReceived[sanitizedQueueName]);
 });
 
 // Endpoint to serve the metrics
