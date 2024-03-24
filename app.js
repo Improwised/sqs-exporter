@@ -54,7 +54,7 @@ async function getSQSAttributes(queueName) {
     const params = {
       QueueUrl: queueUrl,
       AttributeNames: [
-        'ApproximateNumberOfMessagesVisible',
+        'ApproximateNumberOfMessages',
         'ApproximateNumberOfMessagesNotVisible',
         'ApproximateNumberOfMessagesDelayed'
       ]
@@ -63,7 +63,7 @@ async function getSQSAttributes(queueName) {
     const data = await sqs.send(command);
 
     // Set the custom metrics with the values from SQS attributes
-    sqsApproximateNumberOfMessagesVisible.set({queueName}, data.Attributes.ApproximateNumberOfMessagesVisible || 0);
+    sqsApproximateNumberOfMessagesVisible.set({queueName}, data.Attributes.ApproximateNumberOfMessages || 0);
     sqsApproximateNumberOfMessagesNotVisible.set({queueName}, data.Attributes.ApproximateNumberOfMessagesNotVisible || 0);
     sqsApproximateNumberOfMessagesDelayed.set({queueName}, data.Attributes.ApproximateNumberOfMessagesDelayed || 0);
 
@@ -94,8 +94,8 @@ const queueNames = process.env.SQS_QUEUES ? process.env.SQS_QUEUES.split(',') : 
 queueNames.forEach(queueName => {
   const sanitizedQueueName = queueName.replace(/[^a-zA-Z0-9_:]/g, '_');
   sqsApproximateNumberOfMessagesVisible = new client.Gauge({
-    name: 'sqs_approximate_number_of_messages_visible',
-    help: 'Approximate number of messages visible in the SQS queue',
+    name: 'sqs_approximate_number_of_messages',
+    help: 'Approximate number of messages in the SQS queue',
     labelNames: ['queueName']
   });
   sqsApproximateNumberOfMessagesNotVisible = new client.Gauge({
