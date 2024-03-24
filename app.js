@@ -26,7 +26,7 @@ AWS.config.update({ region: 'us-east-1' });
 
 const aws_access_key_id = process.env.AWS_ACCESS_KEY_ID;
 const aws_secret_access_key = process.env.AWS_SECRET_ACCESS_KEY;
-const sqs = new AWS.SQS();
+const cloudwatch = new AWS.CloudWatch();
 
 // Add code here for handling errors and logging
 async function getQueueUrl(queueName) {
@@ -44,16 +44,29 @@ async function getQueueUrl(queueName) {
 }
 
 // Add code here for handling errors and logging
-async function getSQSMetrics(queueUrl) {
+async function getSQSMetrics(queueName) {
   try {
-    const params = {
-      QueueUrl: queueUrl,
-      AttributeNames: ['All']
-    };
-    const data = await sqs.getQueueAttributes(params).promise();
-    // Set the custom metrics with the values from SQS
-    sqsNumberOfMessagesSent.set(data.Attributes.ApproximateNumberOfMessagesSent);
-    sqsNumberOfMessagesReceived.set(data.Attributes.ApproximateNumberOfMessagesReceived);
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - 600000); // 10 minutes ago
+    const metrics = [
+      { Name: 'NumberOfMessagesSent', Statistic: 'Sum' },
+      { Name: 'NumberOfMessagesReceived', Statistic: 'Sum' }
+    ];
+    const data = await Promise.all(metrics.map(metric =>
+      cloudwatch.getMetricStatistics({
+        Namespace: 'AWS/SQS',
+        MetricName: metric.Name,
+        Dimensions: [{ Name: 'QueueName', Value: queueName }],
+        StartTime: startTime,
+        EndTime: endTime,
+        Period: 300,
+        Statistics: [metric.Statistic]
+      }).promise()
+    ));
+
+    // Set the custom metrics with the values from CloudWatch
+    sqsNumberOfMessagesSent.set(data[0].Datapoints[0] ? data[0].Datapoints[0].Sum : 0);
+    sqsNumberOfMessagesReceived.set(data[1].Datapoints[0] ? data[1].Datapoints[0].Sum : 0);
 
     return data.Attributes; // Keep returning the raw attributes for any other potential use
   } catch (error) {
@@ -90,8 +103,11 @@ register.registerMetric(sqsNumberOfMessagesReceived);
 // Endpoint to serve the metrics
 app.get('/metrics', async (req, res) => {
   try {
+    const queueName = 'YourQueueName'; // Replace with your actual queue name
+    await getSQSMetrics(queueName);
+    const metrics = await register.metrics();
     res.set('Content-Type', register.contentType);
-    res.end(await register.metrics());
+    res.end(metrics);
   } catch (err) {
     res.status(500).end(err);
   }
