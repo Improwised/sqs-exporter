@@ -65,8 +65,8 @@ async function getSQSMetrics(queueName) {
     ));
 
     // Set the custom metrics with the values from CloudWatch
-    sqsNumberOfMessagesSent.set(data[0].Datapoints[0] ? data[0].Datapoints[0].Sum : 0);
-    sqsNumberOfMessagesReceived.set(data[1].Datapoints[0] ? data[1].Datapoints[0].Sum : 0);
+    sqsNumberOfMessagesSent[queueName].set({queueName}, data[0].Datapoints[0] ? data[0].Datapoints[0].Sum : 0);
+    sqsNumberOfMessagesReceived[queueName].set({queueName}, data[1].Datapoints[0] ? data[1].Datapoints[0].Sum : 0);
 
     return data.Attributes; // Keep returning the raw attributes for any other potential use
   } catch (error) {
@@ -86,25 +86,32 @@ const register = new client.Registry();
 client.collectDefaultMetrics({ register });
 
 // Define custom metrics for SQS
-const sqsNumberOfMessagesSent = new client.Gauge({
-  name: 'sqs_number_of_messages_sent',
-  help: 'Number of messages sent to the SQS queue'
-});
+const sqsNumberOfMessagesSent = {};
 
-const sqsNumberOfMessagesReceived = new client.Gauge({
-  name: 'sqs_number_of_messages_received',
-  help: 'Number of messages received from the SQS queue'
-});
+const sqsNumberOfMessagesReceived = {};
 
-// Add custom metrics to the registry
-register.registerMetric(sqsNumberOfMessagesSent);
-register.registerMetric(sqsNumberOfMessagesReceived);
+// Initialize custom metrics for each queue and add them to the registry
+const queueNames = process.env.SQS_QUEUES ? process.env.SQS_QUEUES.split(',') : [];
+queueNames.forEach(queueName => {
+  sqsNumberOfMessagesSent[queueName] = new client.Gauge({
+    name: `sqs_number_of_messages_sent_${queueName}`,
+    help: `Number of messages sent to the SQS queue ${queueName}`,
+    labelNames: ['queueName']
+  });
+  sqsNumberOfMessagesReceived[queueName] = new client.Gauge({
+    name: `sqs_number_of_messages_received_${queueName}`,
+    help: `Number of messages received from the SQS queue ${queueName}`,
+    labelNames: ['queueName']
+  });
+  register.registerMetric(sqsNumberOfMessagesSent[queueName]);
+  register.registerMetric(sqsNumberOfMessagesReceived[queueName]);
+});
 
 // Endpoint to serve the metrics
-app.get('/metrics', async (req, res) => {
+app.get('/metrics', async (_req, res) => {
   try {
-    const queueName = 'YourQueueName'; // Replace with your actual queue name
-    await getSQSMetrics(queueName);
+    const queueNames = process.env.SQS_QUEUES ? process.env.SQS_QUEUES.split(',') : [];
+    await Promise.all(queueNames.map(queueName => getSQSMetrics(queueName)));
     const metrics = await register.metrics();
     res.set('Content-Type', register.contentType);
     res.end(metrics);
