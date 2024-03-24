@@ -1,5 +1,6 @@
 const express = require('express');
 const AWS = require('aws-sdk');
+const client = require('prom-client');
 
 // Set up Express web server
 const app = express();
@@ -50,7 +51,11 @@ async function getSQSMetrics(queueUrl) {
       AttributeNames: ['All']
     };
     const data = await sqs.getQueueAttributes(params).promise();
-    return data.Attributes;
+    // Set the custom metrics with the values from SQS
+    sqsNumberOfMessagesSent.set(data.Attributes.ApproximateNumberOfMessagesSent);
+    sqsNumberOfMessagesReceived.set(data.Attributes.ApproximateNumberOfMessagesReceived);
+
+    return data.Attributes; // Keep returning the raw attributes for any other potential use
   } catch (error) {
     console.error('Error:', error.stack);
     throw error;
@@ -61,3 +66,34 @@ module.exports = {
   getQueueUrl,
   getSQSMetrics
 };
+// Create a Prometheus Registry
+const register = new client.Registry();
+
+// Enable the collection of default metrics
+client.collectDefaultMetrics({ register });
+
+// Define custom metrics for SQS
+const sqsNumberOfMessagesSent = new client.Gauge({
+  name: 'sqs_number_of_messages_sent',
+  help: 'Number of messages sent to the SQS queue'
+});
+
+const sqsNumberOfMessagesReceived = new client.Gauge({
+  name: 'sqs_number_of_messages_received',
+  help: 'Number of messages received from the SQS queue'
+});
+
+// Add custom metrics to the registry
+register.registerMetric(sqsNumberOfMessagesSent);
+register.registerMetric(sqsNumberOfMessagesReceived);
+
+// Endpoint to serve the metrics
+app.get('/metrics', async (req, res) => {
+  try {
+    res.set('Content-Type', register.contentType);
+    res.end(await register.metrics());
+  } catch (err) {
+    res.status(500).end(err);
+  }
+});
+
