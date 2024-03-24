@@ -5,6 +5,8 @@ const client = require('prom-client');
 // Set up Express web server
 const app = express();
 const PORT = process.env.PORT || 3001;
+const aws_access_key_id = process.env.AWS_ACCESS_KEY_ID;
+const aws_secret_access_key = process.env.AWS_SECRET_ACCESS_KEY;
 
 // Add code here for handling errors and logging
 app.use((err, req, res, next) => {
@@ -24,8 +26,6 @@ app.listen(PORT, () => {
 // Set up AWS SDK
 AWS.config.update({ region: 'us-east-1' });
 
-const aws_access_key_id = process.env.AWS_ACCESS_KEY_ID;
-const aws_secret_access_key = process.env.AWS_SECRET_ACCESS_KEY;
 const cloudwatch = new AWS.CloudWatch();
 
 // Add code here for handling errors and logging
