@@ -44,29 +44,23 @@ async function getQueueUrl(queueName) {
 }
 
 // Add code here for handling errors and logging
-async function getSQSMetrics(queueName) {
+async function getSQSAttributes(queueName) {
   try {
-    const endTime = new Date();
-    const startTime = new Date(endTime.getTime() - 600000); // 10 minutes ago
-    const metrics = [
-      { Name: 'NumberOfMessagesSent', Statistic: 'Sum' },
-      { Name: 'NumberOfMessagesReceived', Statistic: 'Sum' }
-    ];
-    const data = await Promise.all(metrics.map(metric =>
-      cloudwatch.getMetricStatistics({
-        Namespace: 'AWS/SQS',
-        MetricName: metric.Name,
-        Dimensions: [{ Name: 'QueueName', Value: queueName }],
-        StartTime: startTime,
-        EndTime: endTime,
-        Period: 300,
-        Statistics: [metric.Statistic]
-      }).promise()
-    ));
+    const queueUrl = await getQueueUrl(queueName);
+    const params = {
+      QueueUrl: queueUrl,
+      AttributeNames: [
+        'ApproximateNumberOfMessagesVisible',
+        'ApproximateNumberOfMessagesNotVisible',
+        'ApproximateNumberOfMessagesDelayed'
+      ]
+    };
+    const data = await sqs.getQueueAttributes(params).promise();
 
-    // Set the custom metrics with the values from CloudWatch
-    sqsNumberOfMessagesSent[queueName].set({queueName}, data[0].Datapoints[0] ? data[0].Datapoints[0].Sum : 0);
-    sqsNumberOfMessagesReceived[queueName].set({queueName}, data[1].Datapoints[0] ? data[1].Datapoints[0].Sum : 0);
+    // Set the custom metrics with the values from SQS attributes
+    sqsApproximateNumberOfMessagesVisible[queueName].set({queueName}, data.Attributes.ApproximateNumberOfMessagesVisible || 0);
+    sqsApproximateNumberOfMessagesNotVisible[queueName].set({queueName}, data.Attributes.ApproximateNumberOfMessagesNotVisible || 0);
+    sqsApproximateNumberOfMessagesDelayed[queueName].set({queueName}, data.Attributes.ApproximateNumberOfMessagesDelayed || 0);
 
     return data.Attributes; // Keep returning the raw attributes for any other potential use
   } catch (error) {
@@ -86,33 +80,40 @@ const register = new client.Registry();
 client.collectDefaultMetrics({ register });
 
 // Define custom metrics for SQS
-const sqsNumberOfMessagesSent = {};
+const sqsApproximateNumberOfMessagesVisible = {};
 
-const sqsNumberOfMessagesReceived = {};
+const sqsApproximateNumberOfMessagesNotVisible = {};
+const sqsApproximateNumberOfMessagesDelayed = {};
 
 // Initialize custom metrics for each queue and add them to the registry
 const queueNames = process.env.SQS_QUEUES ? process.env.SQS_QUEUES.split(',') : [];
 queueNames.forEach(queueName => {
   const sanitizedQueueName = queueName.replace(/[^a-zA-Z0-9_:]/g, '_');
-  sqsNumberOfMessagesSent[queueName] = new client.Gauge({
-    name: `sqs_number_of_messages_sent_${sanitizedQueueName}`,
-    help: `Number of messages sent to the SQS queue ${queueName}`,
+  sqsApproximateNumberOfMessagesVisible[queueName] = new client.Gauge({
+    name: `sqs_approximate_number_of_messages_visible_${sanitizedQueueName}`,
+    help: `Approximate number of messages visible in the SQS queue ${queueName}`,
     labelNames: ['queueName']
   });
-  sqsNumberOfMessagesReceived[queueName] = new client.Gauge({
-    name: `sqs_number_of_messages_received_${sanitizedQueueName}`,
-    help: `Number of messages received from the SQS queue ${queueName}`,
+  sqsApproximateNumberOfMessagesNotVisible[queueName] = new client.Gauge({
+    name: `sqs_approximate_number_of_messages_not_visible_${sanitizedQueueName}`,
+    help: `Approximate number of messages not visible in the SQS queue ${queueName}`,
     labelNames: ['queueName']
   });
-  register.registerMetric(sqsNumberOfMessagesSent[sanitizedQueueName]);
-  register.registerMetric(sqsNumberOfMessagesReceived[sanitizedQueueName]);
+  sqsApproximateNumberOfMessagesDelayed[queueName] = new client.Gauge({
+    name: `sqs_approximate_number_of_messages_delayed_${sanitizedQueueName}`,
+    help: `Approximate number of messages delayed in the SQS queue ${queueName}`,
+    labelNames: ['queueName']
+  });
+  register.registerMetric(sqsApproximateNumberOfMessagesVisible[sanitizedQueueName]);
+  register.registerMetric(sqsApproximateNumberOfMessagesNotVisible[sanitizedQueueName]);
+  register.registerMetric(sqsApproximateNumberOfMessagesDelayed[sanitizedQueueName]);
 });
 
 // Endpoint to serve the metrics
-app.get('/metrics', async (_req, res) => {
+app.get('/metrics', async (req, res) => {
   try {
     const queueNames = process.env.SQS_QUEUES ? process.env.SQS_QUEUES.split(',') : [];
-    await Promise.all(queueNames.map(queueName => getSQSMetrics(queueName)));
+    await Promise.all(queueNames.map(queueName => getSQSAttributes(queueName)));
     const metrics = await register.metrics();
     res.set('Content-Type', register.contentType);
     res.end(metrics);
@@ -120,4 +121,3 @@ app.get('/metrics', async (_req, res) => {
     res.status(500).end(err);
   }
 });
-
