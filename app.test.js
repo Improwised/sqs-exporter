@@ -6,7 +6,17 @@ const { SQSClient } = require('@aws-sdk/client-sqs');
 // Mock AWS SQS and CloudWatch services
 AWSMock.setSDKInstance(SQSClient);
 
+const { startServer, stopServer } = require('./app');
+
 describe('GET /ping', () => {
+  beforeAll(() => {
+    startServer();
+  });
+
+  afterAll(() => {
+    stopServer();
+  });
+
   it('responds with pong', async () => {
     const response = await request(app).get('/ping');
     expect(response.statusCode).toBe(200);
@@ -16,11 +26,11 @@ describe('GET /ping', () => {
 
 describe('GET /metrics', () => {
   beforeAll(() => {
-    AWSMock.mock('SQS', 'getQueueUrl', (params, callback) => {
+    AWSMock.mock('SQSClient', 'getQueueUrl', (params, callback) => {
       callback(null, { QueueUrl: `http://example.com/${params.QueueName}` });
     });
 
-    AWSMock.mock('SQS', 'getQueueAttributes', (params, callback) => {
+    AWSMock.mock('SQSClient', 'getQueueAttributes', (params, callback) => {
       callback(null, {
         Attributes: {
           ApproximateNumberOfMessages: '10',
@@ -32,7 +42,7 @@ describe('GET /metrics', () => {
   });
 
   afterAll(() => {
-    AWSMock.restore('SQS');
+    AWSMock.restore('SQSClient');
   });
 
   it('responds with metrics', async () => {

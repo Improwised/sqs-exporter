@@ -4,6 +4,8 @@ const { CloudWatchClient } = require('@aws-sdk/client-cloudwatch');
 const { fromIni } = require('@aws-sdk/credential-provider-ini');
 const client = require('prom-client');
 
+let server;
+
 // Set up Express web server
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -21,9 +23,24 @@ app.get('/ping', (req, res) => {
   res.status(200).send('pong');
 });
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+
+function startServer() {
+  server = app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+  });
+}
+
+function stopServer() {
+  if (server) {
+    server.close();
+  }
+}
+
+module.exports = {
+  app,
+  startServer,
+  stopServer
+};
 
 // Set up AWS SDK
 const awsProfile = process.env.AWS_PROFILE || 'default';
