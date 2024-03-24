@@ -35,8 +35,11 @@ const awsCredentials = defaultProvider({
 });
 
 // Load the AWS config files and extract the region for the given profile
-const awsConfig = await loadSharedConfigFiles();
-const awsRegion = awsConfig.configFile[awsProfile].region;
+let awsRegion;
+(async () => {
+  const awsConfig = await loadSharedConfigFiles();
+  awsRegion = awsConfig.configFile[awsProfile].region;
+})();
 
 const sqs = new SQSClient({ region: awsRegion, credentials: awsCredentials });
 const cloudwatch = new CloudWatchClient({ region: awsRegion, credentials: awsCredentials });
