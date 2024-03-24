@@ -1,5 +1,7 @@
 const express = require('express');
-const AWS = require('aws-sdk');
+const { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand } = require('@aws-sdk/client-sqs');
+const { CloudWatchClient } = require('@aws-sdk/client-cloudwatch');
+const { fromIni } = require('@aws-sdk/credential-provider-ini');
 const client = require('prom-client');
 
 // Set up Express web server
@@ -24,8 +26,9 @@ app.listen(PORT, () => {
 });
 
 // Set up AWS SDK
-AWS.config.update({ region: 'us-east-1' });
-const sqs = new AWS.SQS();
+const awsRegion = 'us-east-1';
+const sqs = new SQSClient({ region: awsRegion, credentials: fromIni({ profile: 'default' }) });
+const cloudwatch = new CloudWatchClient({ region: awsRegion, credentials: fromIni({ profile: 'default' }) });
 
 const cloudwatch = new AWS.CloudWatch();
 
@@ -33,7 +36,8 @@ const cloudwatch = new AWS.CloudWatch();
 async function getQueueUrl(queueName) {
   try {
     const params = { QueueName: queueName };
-    const data = await sqs.getQueueUrl(params).promise();
+    const command = new GetQueueUrlCommand(params);
+    const data = await sqs.send(command);
     return data.QueueUrl;
   } catch (error) {
     console.error('Error:', error.stack);
@@ -53,7 +57,8 @@ async function getSQSAttributes(queueName) {
         'ApproximateNumberOfMessagesDelayed'
       ]
     };
-    const data = await sqs.getQueueAttributes(params).promise();
+    const command = new GetQueueAttributesCommand(params);
+    const data = await sqs.send(command);
 
     // Set the custom metrics with the values from SQS attributes
     sqsApproximateNumberOfMessagesVisible.set({queueName}, data.Attributes.ApproximateNumberOfMessagesVisible || 0);
