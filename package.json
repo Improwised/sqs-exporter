@@ -16,7 +16,7 @@
     "@aws-sdk/credential-provider-ini": "^3.40.0",
     "@aws-sdk/credential-provider-node": "^3.40.0",
     "@aws-sdk/shared-ini-file-loader": "^3.40.0",
-    "express": "^4.19.2",
+    "express": "^4.22.1",
     "prom-client": "^15.1.0"
   },
   "devDependencies": {
