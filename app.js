@@ -55,6 +55,13 @@ const sqsExporterQueueUp = new client.Gauge({
 });
 register.registerMetric(sqsExporterQueueUp);
 
+const sqsApproximateNumberOfGroupsWithInflightMessages = new client.Gauge({
+  name: 'sqs_approximate_number_of_groups_with_inflight_messages',
+  help: 'Approximate number of groups with in-flight messages (FIFO queues only)',
+  labelNames: ['queueName']
+});
+register.registerMetric(sqsApproximateNumberOfGroupsWithInflightMessages);
+
 let sqs = null;
 
 async function getQueueUrl(queueName) {
@@ -81,7 +88,8 @@ async function getSQSAttributes(queueName) {
       AttributeNames: [
         'ApproximateNumberOfMessages',
         'ApproximateNumberOfMessagesNotVisible',
-        'ApproximateNumberOfMessagesDelayed'
+        'ApproximateNumberOfMessagesDelayed',
+        'ApproximateNumberOfGroupsWithInflightMessages'
       ]
     });
 
@@ -99,6 +107,15 @@ async function getSQSAttributes(queueName) {
       { queueName },
       parseInt(data.Attributes.ApproximateNumberOfMessagesDelayed, 10) || 0
     );
+
+    if (data.Attributes.ApproximateNumberOfGroupsWithInflightMessages !== undefined) {
+      sqsApproximateNumberOfGroupsWithInflightMessages.set(
+        { queueName },
+        parseInt(data.Attributes.ApproximateNumberOfGroupsWithInflightMessages, 10) || 0
+      );
+    } else {
+      sqsApproximateNumberOfGroupsWithInflightMessages.reset({ queueName });
+    }
 
     return data.Attributes;
   } catch (error) {

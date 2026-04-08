@@ -575,6 +575,68 @@ describe('graceful shutdown', () => {
   });
 });
 
+describe('FIFO in-flight groups metric', () => {
+  it('exposes ApproximateNumberOfGroupsWithInflightMessages for FIFO queues', async () => {
+    process.env.SQS_QUEUES = 'my-queue.fifo';
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+      }
+      if (command.input.QueueUrl) {
+        return {
+          Attributes: {
+            ApproximateNumberOfMessages: '10',
+            ApproximateNumberOfMessagesNotVisible: '5',
+            ApproximateNumberOfMessagesDelayed: '2',
+            ApproximateNumberOfGroupsWithInflightMessages: '3'
+          }
+        };
+      }
+      return {};
+    });
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_approximate_number_of_groups_with_inflight_messages{queueName="my-queue.fifo"} 3');
+
+    await stopServer();
+  });
+
+  it('does not fail when ApproximateNumberOfGroupsWithInflightMessages is missing', async () => {
+    process.env.SQS_QUEUES = 'standard-queue';
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+      }
+      if (command.input.QueueUrl) {
+        return {
+          Attributes: {
+            ApproximateNumberOfMessages: '10',
+            ApproximateNumberOfMessagesNotVisible: '5',
+            ApproximateNumberOfMessagesDelayed: '2'
+          }
+        };
+      }
+      return {};
+    });
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.statusCode).toBe(200);
+    expect(response.text).not.toContain('sqs_approximate_number_of_groups_with_inflight_messages{queueName="standard-queue"}');
+
+    await stopServer();
+  });
+});
+
 describe('startServer', () => {
   it('fails fast when queues are not configured', async () => {
     delete process.env.SQS_QUEUES;
