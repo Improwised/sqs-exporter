@@ -87,6 +87,14 @@ function loadConfig() {
     process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || 10000,
     'GRACEFUL_SHUTDOWN_TIMEOUT_MS'
   );
+  const discoveryTtlMs = validatePositiveInt(
+    process.env.SQS_DISCOVERY_TTL_MS || 900000,
+    'SQS_DISCOVERY_TTL_MS'
+  );
+  const maxDiscoveredQueues = validatePositiveInt(
+    process.env.SQS_MAX_DISCOVERED_QUEUES || 100,
+    'SQS_MAX_DISCOVERED_QUEUES'
+  );
   const sqsConfig = { region: awsRegion };
   if (process.env.SQS_MAX_ATTEMPTS) {
     sqsConfig.maxAttempts = validatePositiveInt(process.env.SQS_MAX_ATTEMPTS, 'SQS_MAX_ATTEMPTS');
@@ -107,6 +115,8 @@ function loadConfig() {
     refreshIntervalMs,
     maxConcurrency,
     gracefulShutdownTimeoutMs,
+    discoveryTtlMs,
+    maxDiscoveredQueues,
     sqsConfig
   });
 }

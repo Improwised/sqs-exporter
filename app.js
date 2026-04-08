@@ -1,5 +1,5 @@
 const express = require('express');
-const { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand } = require('@aws-sdk/client-sqs');
+const { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand, ListQueuesCommand } = require('@aws-sdk/client-sqs');
 const client = require('prom-client');
 const { loadConfig } = require('./config');
 
@@ -13,6 +13,8 @@ let lastRefreshStart = 0;
 const MAX_BACKOFF_MULTIPLIER = 32;
 const queueState = {};
 const queueUrlCache = {};
+let discoveredQueueUrls = [];
+let discoveryTimestamp = 0;
 
 const app = express();
 
@@ -213,6 +215,63 @@ async function boundedMap(items, fn, concurrency) {
   return results;
 }
 
+function parseQueueNameFromUrl(url) {
+  const parts = url.split('/');
+  return parts[parts.length - 1];
+}
+
+async function discoverQueues() {
+  const cfg = getConfig();
+  const now = Date.now();
+
+  if (discoveredQueueUrls.length > 0 && (now - discoveryTimestamp) < cfg.discoveryTtlMs) {
+    return discoveredQueueUrls;
+  }
+
+  const prefixes = cfg.queueNames.filter((name) => name.endsWith('*'));
+  const exactNames = cfg.queueNames.filter((name) => !name.endsWith('*'));
+
+  if (prefixes.length === 0) {
+    discoveredQueueUrls = [];
+    return discoveredQueueUrls;
+  }
+
+  const allDiscovered = [];
+  for (const prefix of prefixes) {
+    const prefixStr = prefix.slice(0, -1);
+    try {
+      const command = new ListQueuesCommand({ QueueNamePrefix: prefixStr });
+      const data = await sqs.send(command);
+      const urls = data.QueueUrls || [];
+      if (urls.length === 0) {
+        console.error(`Prefix "${prefix}" returned no matches`);
+      }
+      allDiscovered.push(...urls);
+    } catch (error) {
+      console.error(`Failed to discover queues for prefix "${prefix}": ${error.message}`);
+    }
+  }
+
+  if (allDiscovered.length > cfg.maxDiscoveredQueues) {
+    console.error(`Discovered ${allDiscovered.length} queues exceeds SQS_MAX_DISCOVERED_QUEUES=${cfg.maxDiscoveredQueues}, truncating`);
+    allDiscovered.length = cfg.maxDiscoveredQueues;
+  }
+
+  discoveredQueueUrls = allDiscovered.map((url) => ({
+    url,
+    name: parseQueueNameFromUrl(url)
+  }));
+
+  const allNames = [
+    ...exactNames,
+    ...discoveredQueueUrls.map((d) => d.name)
+  ];
+  console.log(`Discovered queues: ${allNames.join(', ')}`);
+
+  discoveryTimestamp = now;
+  return discoveredQueueUrls;
+}
+
 async function refreshOnce() {
   if (refreshing) {
     return;
@@ -222,13 +281,16 @@ async function refreshOnce() {
   const refreshStart = Date.now();
   try {
     const cfg = getConfig();
-    const queueNames = cfg.queueNames;
+    const exactNames = cfg.queueNames.filter((name) => !name.endsWith('*'));
     const queueUrls = cfg.queueUrls;
     const maxConcurrency = cfg.maxConcurrency;
 
+    const discovered = await discoverQueues();
+
     const allTargets = [
-      ...queueNames.map((name) => ({ name, url: null, type: 'name' })),
-      ...queueUrls.map((u) => ({ name: u.name, url: u.url, type: 'url' }))
+      ...exactNames.map((name) => ({ name, url: null, type: 'name' })),
+      ...queueUrls.map((u) => ({ name: u.name, url: u.url, type: 'url' })),
+      ...discovered.map((d) => ({ name: d.name, url: d.url, type: 'url' }))
     ];
 
     const rawResults = await boundedMap(
@@ -423,6 +485,8 @@ function stopServer() {
       shuttingDown = false;
       Object.keys(queueState).forEach((k) => delete queueState[k]);
       Object.keys(queueUrlCache).forEach((k) => delete queueUrlCache[k]);
+      discoveredQueueUrls = [];
+      discoveryTimestamp = 0;
       resolve();
     });
   });

@@ -21,7 +21,13 @@ jest.mock('@aws-sdk/client-sqs', () => {
     }
   }
 
-  return { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand };
+  class ListQueuesCommand {
+    constructor(input) {
+      this.input = input;
+    }
+  }
+
+  return { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand, ListQueuesCommand };
 });
 
 const originalEnv = process.env;
@@ -36,6 +42,9 @@ function loadApp() {
 
 function mockSuccessfulSqs() {
   mockSend.mockImplementation(async (command) => {
+    if (command.input.QueueNamePrefix !== undefined) {
+      return { QueueUrls: [] };
+    }
     if (command.input.QueueName) {
       return { QueueUrl: `https://example.com/${command.input.QueueName}` };
     }
@@ -57,6 +66,8 @@ beforeEach(() => {
   process.env = { ...originalEnv, AWS_REGION: 'us-west-2' };
   delete process.env.AWS_PROFILE;
   delete process.env.METRICS_REFRESH_INTERVAL_MS;
+  delete process.env.SQS_DISCOVERY_TTL_MS;
+  delete process.env.SQS_MAX_DISCOVERED_QUEUES;
 });
 
 afterAll(() => {
@@ -126,17 +137,19 @@ describe('refreshOnce', () => {
   it('prevents overlapping refresh cycles', async () => {
     process.env.SQS_QUEUES = 'queue-a';
 
-    let resolveFirst;
     let inFlight = false;
     let overlapDetected = false;
 
     mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueNamePrefix !== undefined) {
+        return { QueueUrls: [] };
+      }
       if (inFlight) {
         overlapDetected = true;
       }
       if (command.input.QueueName) {
         inFlight = true;
-        await new Promise((r) => { resolveFirst = r; });
+        await new Promise((r) => setTimeout(r, 50));
         inFlight = false;
         return { QueueUrl: `https://example.com/${command.input.QueueName}` };
       }
@@ -155,7 +168,6 @@ describe('refreshOnce', () => {
     const firstRefresh = refreshOnce();
     const secondRefresh = refreshOnce();
 
-    resolveFirst();
     await Promise.all([firstRefresh, secondRefresh]);
 
     expect(overlapDetected).toBe(false);
@@ -572,6 +584,162 @@ describe('graceful shutdown', () => {
     const config = loadConfig();
 
     expect(config.gracefulShutdownTimeoutMs).toBe(10000);
+  });
+});
+
+describe('prefix-based queue discovery', () => {
+  it('resolves prefix tokens ending with * via ListQueues', async () => {
+    process.env.SQS_QUEUES = 'orders-*,my-exact-queue';
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueNamePrefix !== undefined) {
+        return {
+          QueueUrls: [
+            'https://sqs.us-west-2.amazonaws.com/123/orders-created',
+            'https://sqs.us-west-2.amazonaws.com/123/orders-shipped'
+          ]
+        };
+      }
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://sqs.us-west-2.amazonaws.com/123/${command.input.QueueName}` };
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '5',
+          ApproximateNumberOfMessagesNotVisible: '0',
+          ApproximateNumberOfMessagesDelayed: '0'
+        }
+      };
+    });
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('queueName="orders-created"');
+    expect(response.text).toContain('queueName="orders-shipped"');
+    expect(response.text).toContain('queueName="my-exact-queue"');
+
+    await stopServer();
+  });
+
+  it('warns and continues when prefix has no matches', async () => {
+    process.env.SQS_QUEUES = 'nonexistent-*,exact-queue';
+
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueNamePrefix !== undefined) {
+        return { QueueUrls: [] };
+      }
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://sqs.us-west-2.amazonaws.com/123/${command.input.QueueName}` };
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '1',
+          ApproximateNumberOfMessagesNotVisible: '0',
+          ApproximateNumberOfMessagesDelayed: '0'
+        }
+      };
+    });
+
+    const { startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const warnCalls = consoleSpy.mock.calls.filter((c) =>
+      c[0].includes('nonexistent-*') && c[0].includes('no matches')
+    );
+    expect(warnCalls.length).toBeGreaterThanOrEqual(1);
+
+    consoleSpy.mockRestore();
+    await stopServer();
+  });
+
+  it('caches discovery results within TTL', async () => {
+    process.env.SQS_QUEUES = 'orders-*';
+    process.env.SQS_DISCOVERY_TTL_MS = '60000';
+
+    let listQueuesCallCount = 0;
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueNamePrefix !== undefined) {
+        listQueuesCallCount++;
+        return {
+          QueueUrls: [
+            'https://sqs.us-west-2.amazonaws.com/123/orders-created'
+          ]
+        };
+      }
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://sqs.us-west-2.amazonaws.com/123/${command.input.QueueName}` };
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '1',
+          ApproximateNumberOfMessagesNotVisible: '0',
+          ApproximateNumberOfMessagesDelayed: '0'
+        }
+      };
+    });
+
+    const { startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const callsAfterFirst = listQueuesCallCount;
+
+    await refreshOnce();
+    expect(listQueuesCallCount).toBe(callsAfterFirst);
+
+    await stopServer();
+  });
+
+  it('caps discovered queues at SQS_MAX_DISCOVERED_QUEUES', async () => {
+    process.env.SQS_QUEUES = 'orders-*';
+    process.env.SQS_MAX_DISCOVERED_QUEUES = '2';
+
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueNamePrefix !== undefined) {
+        return {
+          QueueUrls: [
+            'https://sqs.us-west-2.amazonaws.com/123/orders-1',
+            'https://sqs.us-west-2.amazonaws.com/123/orders-2',
+            'https://sqs.us-west-2.amazonaws.com/123/orders-3'
+          ]
+        };
+      }
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://sqs.us-west-2.amazonaws.com/123/${command.input.QueueName}` };
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '1',
+          ApproximateNumberOfMessagesNotVisible: '0',
+          ApproximateNumberOfMessagesDelayed: '0'
+        }
+      };
+    });
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('queueName="orders-1"');
+    expect(response.text).toContain('queueName="orders-2"');
+    expect(response.text).not.toContain('queueName="orders-3"');
+
+    const warnCalls = consoleSpy.mock.calls.filter((c) =>
+      c[0].includes('exceeds') || c[0].includes('SQS_MAX_DISCOVERED_QUEUES')
+    );
+    expect(warnCalls.length).toBeGreaterThanOrEqual(1);
+
+    consoleSpy.mockRestore();
+    await stopServer();
   });
 });
 
