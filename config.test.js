@@ -226,4 +226,50 @@ describe('loadConfig', () => {
 
     expect(() => loadConfig()).toThrow('Duplicate queue name');
   });
+
+  it('adds SQS_MAX_ATTEMPTS to sqsConfig', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_MAX_ATTEMPTS = '5';
+
+    const config = loadConfig();
+
+    expect(config.sqsConfig.maxAttempts).toBe(5);
+  });
+
+  it('adds SQS_REQUEST_TIMEOUT_MS to sqsConfig', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_REQUEST_TIMEOUT_MS = '5000';
+
+    const config = loadConfig();
+
+    expect(config.sqsConfig.requestTimeout).toBe(5000);
+  });
+
+  it('throws on invalid SQS_MAX_ATTEMPTS', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_MAX_ATTEMPTS = '0';
+
+    expect(() => loadConfig()).toThrow('SQS_MAX_ATTEMPTS must be a positive integer');
+  });
+
+  it('throws on invalid SQS_REQUEST_TIMEOUT_MS', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_REQUEST_TIMEOUT_MS = '-1';
+
+    expect(() => loadConfig()).toThrow('SQS_REQUEST_TIMEOUT_MS must be a positive integer');
+  });
+
+  it('defaults SQS_MAX_ATTEMPTS and SQS_REQUEST_TIMEOUT_MS when not set', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+
+    const config = loadConfig();
+
+    expect(config.sqsConfig.maxAttempts).toBeUndefined();
+    expect(config.sqsConfig.requestTimeout).toBeUndefined();
+  });
 });

@@ -88,6 +88,12 @@ function loadConfig() {
     'GRACEFUL_SHUTDOWN_TIMEOUT_MS'
   );
   const sqsConfig = { region: awsRegion };
+  if (process.env.SQS_MAX_ATTEMPTS) {
+    sqsConfig.maxAttempts = validatePositiveInt(process.env.SQS_MAX_ATTEMPTS, 'SQS_MAX_ATTEMPTS');
+  }
+  if (process.env.SQS_REQUEST_TIMEOUT_MS) {
+    sqsConfig.requestTimeout = validatePositiveInt(process.env.SQS_REQUEST_TIMEOUT_MS, 'SQS_REQUEST_TIMEOUT_MS');
+  }
   if (awsProfile) {
     sqsConfig.credentials = fromIni({ profile: awsProfile });
   }
