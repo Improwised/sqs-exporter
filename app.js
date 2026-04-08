@@ -1,7 +1,7 @@
 const express = require('express');
 const { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand } = require('@aws-sdk/client-sqs');
-const { fromIni } = require('@aws-sdk/credential-provider-ini');
 const client = require('prom-client');
+const { loadConfig } = require('./config');
 
 let server;
 let refreshTimer = null;
@@ -11,52 +11,16 @@ let consecutiveFailures = 0;
 const MAX_BACKOFF_MULTIPLIER = 32;
 
 const app = express();
-const PORT = Number(process.env.PORT || 3001);
-const awsProfile = process.env.AWS_PROFILE;
-const awsRegion = process.env.AWS_REGION || 'us-west-2';
-const REFRESH_INTERVAL_MS = Number(process.env.METRICS_REFRESH_INTERVAL_MS || 15000);
 
-function parseQueueNames() {
-  if (!process.env.SQS_QUEUES) {
-    return [];
-  }
+let config = null;
 
-  return process.env.SQS_QUEUES
-    .split(',')
-    .map((queueName) => queueName.trim())
-    .filter(Boolean);
+function getConfig() {
+  return config;
 }
 
-function validateRegion(region) {
-  return /^[a-z]{2}-[a-z]+-\d+$/.test(region);
+function validateRuntimeConfiguration() {
+  config = loadConfig();
 }
-
-async function validateRuntimeConfiguration() {
-  const queueNames = parseQueueNames();
-
-  if (queueNames.length === 0) {
-    throw new Error('SQS_QUEUES must include at least one queue name.');
-  }
-
-  if (!validateRegion(awsRegion)) {
-    throw new Error(`AWS_REGION is invalid: "${awsRegion}"`);
-  }
-
-  if (awsProfile) {
-    try {
-      await fromIni({ profile: awsProfile })();
-    } catch (error) {
-      throw new Error(`Unable to load AWS profile "${awsProfile}". ${error.message}`);
-    }
-  }
-}
-
-const sqsConfig = { region: awsRegion };
-if (awsProfile) {
-  sqsConfig.credentials = fromIni({ profile: awsProfile });
-}
-
-const sqs = new SQSClient(sqsConfig);
 
 const register = new client.Registry();
 client.collectDefaultMetrics({ register });
@@ -80,6 +44,8 @@ const sqsApproximateNumberOfMessagesDelayed = new client.Gauge({
 register.registerMetric(sqsApproximateNumberOfMessagesVisible);
 register.registerMetric(sqsApproximateNumberOfMessagesNotVisible);
 register.registerMetric(sqsApproximateNumberOfMessagesDelayed);
+
+let sqs = null;
 
 async function getQueueUrl(queueName) {
   try {
@@ -133,7 +99,7 @@ async function refreshOnce() {
 
   refreshing = true;
   try {
-    const queueNames = parseQueueNames();
+    const queueNames = getConfig().queueNames;
     await Promise.all(queueNames.map((queueName) => getSQSAttributes(queueName)));
     consecutiveFailures = 0;
     ready = true;
@@ -147,7 +113,7 @@ async function refreshOnce() {
 
 function getBackoffDelay() {
   const multiplier = Math.min(Math.pow(2, consecutiveFailures), MAX_BACKOFF_MULTIPLIER);
-  return REFRESH_INTERVAL_MS * multiplier;
+  return getConfig().refreshIntervalMs * multiplier;
 }
 
 function scheduleRefresh() {
@@ -203,11 +169,12 @@ app.use((error, req, res, next) => {
 });
 
 async function startServer() {
-  await validateRuntimeConfiguration();
+  validateRuntimeConfiguration();
+  sqs = new SQSClient(getConfig().sqsConfig);
 
   return new Promise((resolve) => {
-    server = app.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
+    server = app.listen(getConfig().port, () => {
+      console.log(`Server is running on port ${getConfig().port}`);
       resolve(server);
     });
   });
@@ -228,6 +195,8 @@ function stopServer() {
       }
 
       server = undefined;
+      sqs = null;
+      config = null;
       ready = false;
       consecutiveFailures = 0;
       resolve();
@@ -241,13 +210,14 @@ module.exports = {
   stopServer,
   getQueueUrl,
   getSQSAttributes,
-  parseQueueNames,
+  parseQueueNames: () => getConfig() ? getConfig().queueNames : [],
   validateRuntimeConfiguration,
   refreshOnce,
   scheduleRefresh,
   isReady,
   stopRefreshLoop,
-  getBackoffDelay
+  getBackoffDelay,
+  getConfig
 };
 
 if (require.main === module) {

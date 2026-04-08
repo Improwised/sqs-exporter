@@ -1,0 +1,142 @@
+const { loadConfig } = require('./config');
+
+describe('loadConfig', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env = { ...originalEnv };
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  it('loads valid configuration from environment', () => {
+    process.env.PORT = '9090';
+    process.env.SQS_QUEUES = 'queue-a, queue-b';
+    process.env.AWS_REGION = 'us-east-1';
+    process.env.METRICS_REFRESH_INTERVAL_MS = '30000';
+
+    const config = loadConfig();
+
+    expect(config.port).toBe(9090);
+    expect(config.queueNames).toEqual(['queue-a', 'queue-b']);
+    expect(config.awsRegion).toBe('us-east-1');
+    expect(config.refreshIntervalMs).toBe(30000);
+  });
+
+  it('applies defaults when env vars are not set', () => {
+    process.env.SQS_QUEUES = 'my-queue';
+    process.env.AWS_REGION = 'eu-west-1';
+    delete process.env.PORT;
+    delete process.env.METRICS_REFRESH_INTERVAL_MS;
+
+    const config = loadConfig();
+
+    expect(config.port).toBe(3001);
+    expect(config.refreshIntervalMs).toBe(15000);
+  });
+
+  it('throws on empty SQS_QUEUES', () => {
+    delete process.env.SQS_QUEUES;
+    process.env.AWS_REGION = 'us-west-2';
+
+    expect(() => loadConfig()).toThrow('SQS_QUEUES must include at least one queue name.');
+  });
+
+  it('throws on whitespace-only SQS_QUEUES', () => {
+    process.env.SQS_QUEUES = '  ,  ,  ';
+    process.env.AWS_REGION = 'us-west-2';
+
+    expect(() => loadConfig()).toThrow('SQS_QUEUES must include at least one queue name.');
+  });
+
+  it('throws on invalid AWS_REGION', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'invalid-region';
+
+    expect(() => loadConfig()).toThrow('AWS_REGION is invalid');
+  });
+
+  it('throws on negative PORT', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.PORT = '-1';
+
+    expect(() => loadConfig()).toThrow('PORT must be a positive integer');
+  });
+
+  it('throws on zero PORT', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.PORT = '0';
+
+    expect(() => loadConfig()).toThrow('PORT must be a positive integer');
+  });
+
+  it('throws on non-numeric PORT', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.PORT = 'abc';
+
+    expect(() => loadConfig()).toThrow('PORT must be a positive integer');
+  });
+
+  it('throws on zero METRICS_REFRESH_INTERVAL_MS', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.METRICS_REFRESH_INTERVAL_MS = '0';
+
+    expect(() => loadConfig()).toThrow('METRICS_REFRESH_INTERVAL_MS must be a positive integer');
+  });
+
+  it('throws on negative METRICS_REFRESH_INTERVAL_MS', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.METRICS_REFRESH_INTERVAL_MS = '-100';
+
+    expect(() => loadConfig()).toThrow('METRICS_REFRESH_INTERVAL_MS must be a positive integer');
+  });
+
+  it('throws on non-numeric METRICS_REFRESH_INTERVAL_MS', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.METRICS_REFRESH_INTERVAL_MS = 'abc';
+
+    expect(() => loadConfig()).toThrow('METRICS_REFRESH_INTERVAL_MS must be a positive integer');
+  });
+
+  it('returns frozen immutable config object', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+
+    const config = loadConfig();
+
+    expect(Object.isFrozen(config)).toBe(true);
+    config.port = 9999;
+    expect(config.port).toBe(3001);
+  });
+
+  it('uses default credential provider chain when AWS_PROFILE is not set', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    delete process.env.AWS_PROFILE;
+
+    const config = loadConfig();
+
+    expect(config.sqsConfig.region).toBe('us-west-2');
+    expect(config.sqsConfig.credentials).toBeUndefined();
+  });
+
+  it('uses fromIni credentials when AWS_PROFILE is set', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.AWS_PROFILE = 'my-profile';
+
+    const config = loadConfig();
+
+    expect(config.sqsConfig.region).toBe('us-west-2');
+    expect(config.sqsConfig.credentials).toBeDefined();
+  });
+});
