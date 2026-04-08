@@ -575,6 +575,64 @@ describe('graceful shutdown', () => {
   });
 });
 
+describe('metric contract', () => {
+  it('exports all required SQS metric names', async () => {
+    process.env.SQS_QUEUES = 'contract-queue';
+
+    mockSuccessfulSqs();
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    const text = response.text;
+
+    const requiredMetrics = [
+      'sqs_approximate_number_of_messages',
+      'sqs_approximate_number_of_messages_not_visible',
+      'sqs_approximate_number_of_messages_delayed',
+      'sqs_exporter_queue_up',
+      'sqs_exporter_last_refresh_timestamp',
+      'sqs_exporter_refresh_duration_seconds',
+      'sqs_exporter_refresh_failures_total',
+      'sqs_exporter_queue_refresh_total'
+    ];
+
+    requiredMetrics.forEach((metric) => {
+      expect(text).toContain(metric);
+    });
+
+    await stopServer();
+  });
+
+  it('all SQS metrics have queueName label', async () => {
+    process.env.SQS_QUEUES = 'label-test-queue';
+
+    mockSuccessfulSqs();
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    const text = response.text;
+
+    const queueLabelMetrics = [
+      'sqs_approximate_number_of_messages{queueName="label-test-queue"}',
+      'sqs_approximate_number_of_messages_not_visible{queueName="label-test-queue"}',
+      'sqs_approximate_number_of_messages_delayed{queueName="label-test-queue"}',
+      'sqs_exporter_queue_up{queueName="label-test-queue"}'
+    ];
+
+    queueLabelMetrics.forEach((metric) => {
+      expect(text).toContain(metric);
+    });
+
+    await stopServer();
+  });
+});
+
 describe('self-observability metrics', () => {
   it('exposes last successful refresh timestamp', async () => {
     process.env.SQS_QUEUES = 'queue-a';

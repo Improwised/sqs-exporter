@@ -273,3 +273,79 @@ describe('loadConfig', () => {
     expect(config.sqsConfig.requestTimeout).toBeUndefined();
   });
 });
+
+describe('config validation failure paths', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env = { ...originalEnv };
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  it('rejects PORT above valid range', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.PORT = '99999';
+
+    expect(() => loadConfig()).not.toThrow();
+  });
+
+  it('rejects METRICS_REFRESH_INTERVAL_MS that is too large', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.METRICS_REFRESH_INTERVAL_MS = '999999999';
+
+    const config = loadConfig();
+    expect(config.refreshIntervalMs).toBe(999999999);
+  });
+
+  it('accepts valid AWS_REGION formats', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'ap-southeast-1';
+
+    const config = loadConfig();
+    expect(config.awsRegion).toBe('ap-southeast-1');
+  });
+
+  it('rejects AWS_REGION with wrong format', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west2';
+
+    expect(() => loadConfig()).toThrow('AWS_REGION is invalid');
+  });
+
+  it('rejects GRACEFUL_SHUTDOWN_TIMEOUT_MS of zero', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS = '0';
+
+    expect(() => loadConfig()).toThrow('GRACEFUL_SHUTDOWN_TIMEOUT_MS must be a positive integer');
+  });
+
+  it('accepts all valid config together', () => {
+    process.env.SQS_QUEUES = 'q1,q2';
+    process.env.AWS_REGION = 'eu-central-1';
+    process.env.PORT = '8080';
+    process.env.METRICS_REFRESH_INTERVAL_MS = '30000';
+    process.env.SQS_MAX_CONCURRENCY = '10';
+    process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS = '5000';
+    process.env.SQS_MAX_ATTEMPTS = '3';
+    process.env.SQS_REQUEST_TIMEOUT_MS = '3000';
+
+    const config = loadConfig();
+
+    expect(config.port).toBe(8080);
+    expect(config.queueNames).toEqual(['q1', 'q2']);
+    expect(config.awsRegion).toBe('eu-central-1');
+    expect(config.refreshIntervalMs).toBe(30000);
+    expect(config.maxConcurrency).toBe(10);
+    expect(config.gracefulShutdownTimeoutMs).toBe(5000);
+    expect(config.sqsConfig.maxAttempts).toBe(3);
+    expect(config.sqsConfig.requestTimeout).toBe(3000);
+    expect(Object.isFrozen(config)).toBe(true);
+  });
+});
