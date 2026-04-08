@@ -99,33 +99,25 @@ const register = new client.Registry();
 client.collectDefaultMetrics({ register });
 
 // Define custom metrics for SQS
-let sqsApproximateNumberOfMessagesVisible = {};
-let sqsApproximateNumberOfMessagesNotVisible = {};
-let sqsApproximateNumberOfMessagesDelayed = {};
-
-// Initialize custom metrics for each queue and add them to the registry
-const queueNames = process.env.SQS_QUEUES ? process.env.SQS_QUEUES.split(',') : [];
-queueNames.forEach(queueName => {
-  const sanitizedQueueName = queueName.replace(/[^a-zA-Z0-9_:]/g, '_');
-  sqsApproximateNumberOfMessagesVisible = new client.Gauge({
-    name: 'sqs_approximate_number_of_messages',
-    help: 'Approximate number of messages in the SQS queue',
-    labelNames: ['queueName']
-  });
-  sqsApproximateNumberOfMessagesNotVisible = new client.Gauge({
-    name: 'sqs_approximate_number_of_messages_not_visible',
-    help: 'Approximate number of messages not visible in the SQS queue',
-    labelNames: ['queueName']
-  });
-  sqsApproximateNumberOfMessagesDelayed = new client.Gauge({
-    name: 'sqs_approximate_number_of_messages_delayed',
-    help: 'Approximate number of messages delayed in the SQS queue',
-    labelNames: ['queueName']
-  });
-  register.registerMetric(sqsApproximateNumberOfMessagesVisible);
-  register.registerMetric(sqsApproximateNumberOfMessagesNotVisible);
-  register.registerMetric(sqsApproximateNumberOfMessagesDelayed);
+const sqsApproximateNumberOfMessagesVisible = new client.Gauge({
+  name: 'sqs_approximate_number_of_messages',
+  help: 'Approximate number of messages in the SQS queue',
+  labelNames: ['queueName']
 });
+const sqsApproximateNumberOfMessagesNotVisible = new client.Gauge({
+  name: 'sqs_approximate_number_of_messages_not_visible',
+  help: 'Approximate number of messages not visible in the SQS queue',
+  labelNames: ['queueName']
+});
+const sqsApproximateNumberOfMessagesDelayed = new client.Gauge({
+  name: 'sqs_approximate_number_of_messages_delayed',
+  help: 'Approximate number of messages delayed in the SQS queue',
+  labelNames: ['queueName']
+});
+
+register.registerMetric(sqsApproximateNumberOfMessagesVisible);
+register.registerMetric(sqsApproximateNumberOfMessagesNotVisible);
+register.registerMetric(sqsApproximateNumberOfMessagesDelayed);
 
 // Endpoint to serve the metrics
 app.get('/metrics', async (req, res) => {
