@@ -575,6 +575,83 @@ describe('graceful shutdown', () => {
   });
 });
 
+describe('self-observability metrics', () => {
+  it('exposes last successful refresh timestamp', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+
+    mockSuccessfulSqs();
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_exporter_last_refresh_timestamp');
+
+    await stopServer();
+  });
+
+  it('exposes refresh duration', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+
+    mockSuccessfulSqs();
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_exporter_refresh_duration_seconds');
+
+    await stopServer();
+  });
+
+  it('increments refresh failures counter on total failure', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+
+    mockSend.mockRejectedValue(new Error('AWS unavailable'));
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_exporter_refresh_failures_total 1');
+
+    await stopServer();
+  });
+
+  it('tracks per-refresh queue success and failure counts', async () => {
+    process.env.SQS_QUEUES = 'queue-good,queue-bad';
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName === 'queue-bad') {
+        throw new Error('Access denied');
+      }
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '10',
+          ApproximateNumberOfMessagesNotVisible: '5',
+          ApproximateNumberOfMessagesDelayed: '2'
+        }
+      };
+    });
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_exporter_queue_refresh_total{result="success"} 1');
+    expect(response.text).toContain('sqs_exporter_queue_refresh_total{result="failure"} 1');
+
+    await stopServer();
+  });
+});
+
 describe('FIFO in-flight groups metric', () => {
   it('exposes ApproximateNumberOfGroupsWithInflightMessages for FIFO queues', async () => {
     process.env.SQS_QUEUES = 'my-queue.fifo';

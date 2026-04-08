@@ -9,6 +9,7 @@ let refreshing = false;
 let ready = false;
 let consecutiveFailures = 0;
 let shuttingDown = false;
+let lastRefreshStart = 0;
 const MAX_BACKOFF_MULTIPLIER = 32;
 const queueState = {};
 const queueUrlCache = {};
@@ -61,6 +62,31 @@ const sqsApproximateNumberOfGroupsWithInflightMessages = new client.Gauge({
   labelNames: ['queueName']
 });
 register.registerMetric(sqsApproximateNumberOfGroupsWithInflightMessages);
+
+const sqsExporterLastRefreshTimestamp = new client.Gauge({
+  name: 'sqs_exporter_last_refresh_timestamp',
+  help: 'Unix timestamp of the last successful metric refresh'
+});
+register.registerMetric(sqsExporterLastRefreshTimestamp);
+
+const sqsExporterRefreshDurationSeconds = new client.Gauge({
+  name: 'sqs_exporter_refresh_duration_seconds',
+  help: 'Duration of the last refresh cycle in seconds'
+});
+register.registerMetric(sqsExporterRefreshDurationSeconds);
+
+const sqsExporterRefreshFailuresTotal = new client.Counter({
+  name: 'sqs_exporter_refresh_failures_total',
+  help: 'Total number of refresh cycles where all queues failed'
+});
+register.registerMetric(sqsExporterRefreshFailuresTotal);
+
+const sqsExporterQueueRefreshTotal = new client.Counter({
+  name: 'sqs_exporter_queue_refresh_total',
+  help: 'Total per-queue refresh attempts by result',
+  labelNames: ['result']
+});
+register.registerMetric(sqsExporterQueueRefreshTotal);
 
 let sqs = null;
 
@@ -150,6 +176,7 @@ async function refreshOnce() {
   }
 
   refreshing = true;
+  const refreshStart = Date.now();
   try {
     const queueNames = getConfig().queueNames;
     const maxConcurrency = getConfig().maxConcurrency;
@@ -167,11 +194,14 @@ async function refreshOnce() {
 
     let anySuccess = false;
     let anyFailure = false;
+    let successCount = 0;
+    let failureCount = 0;
 
     results.forEach((result, index) => {
       const queueName = queueNames[index];
       if (result.status === 'fulfilled') {
         anySuccess = true;
+        successCount++;
         sqsExporterQueueUp.set({ queueName }, 1);
         if (queueState[queueName] === 'DOWN') {
           console.error(`Queue "${queueName}" transitioned DOWN -> UP`);
@@ -181,6 +211,7 @@ async function refreshOnce() {
         }
       } else {
         anyFailure = true;
+        failureCount++;
         sqsExporterQueueUp.set({ queueName }, 0);
         sqsApproximateNumberOfMessagesVisible.set({ queueName }, 0);
         sqsApproximateNumberOfMessagesNotVisible.set({ queueName }, 0);
@@ -202,6 +233,17 @@ async function refreshOnce() {
 
     if (anyFailure && !anySuccess) {
       consecutiveFailures++;
+      sqsExporterRefreshFailuresTotal.inc();
+    }
+
+    sqsExporterQueueRefreshTotal.inc({ result: 'success' }, successCount);
+    sqsExporterQueueRefreshTotal.inc({ result: 'failure' }, failureCount);
+
+    const refreshDuration = (Date.now() - refreshStart) / 1000;
+    sqsExporterRefreshDurationSeconds.set(refreshDuration);
+
+    if (anySuccess) {
+      sqsExporterLastRefreshTimestamp.set(Date.now() / 1000);
     }
   } finally {
     refreshing = false;
