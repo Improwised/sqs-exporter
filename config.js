@@ -23,11 +23,47 @@ function parseQueueNames(raw) {
     .filter(Boolean);
 }
 
+function parseQueueUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch (_) {
+    throw new Error(`SQS_QUEUE_URLS contains invalid URL: "${url}"`);
+  }
+
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  if (parts.length < 2) {
+    throw new Error(`SQS_QUEUE_URLS contains invalid URL: "${url}"`);
+  }
+
+  const name = parts[parts.length - 1];
+  return { url, name };
+}
+
+function parseQueueUrls(raw) {
+  if (!raw) {
+    return [];
+  }
+
+  return raw
+    .split(',')
+    .map((u) => u.trim())
+    .filter(Boolean)
+    .map(parseQueueUrl);
+}
+
 function loadConfig() {
   const queueNames = parseQueueNames(process.env.SQS_QUEUES);
+  const queueUrls = parseQueueUrls(process.env.SQS_QUEUE_URLS);
 
-  if (queueNames.length === 0) {
-    throw new Error('SQS_QUEUES must include at least one queue name.');
+  if (queueNames.length === 0 && queueUrls.length === 0) {
+    throw new Error('SQS_QUEUES or SQS_QUEUE_URLS must include at least one entry');
+  }
+
+  const urlNames = queueUrls.map((u) => u.name);
+  const duplicates = queueNames.filter((n) => urlNames.includes(n));
+  if (duplicates.length > 0) {
+    throw new Error(`Duplicate queue name between SQS_QUEUES and SQS_QUEUE_URLS: "${duplicates[0]}"`);
   }
 
   const awsRegion = process.env.AWS_REGION || 'us-west-2';
@@ -59,6 +95,7 @@ function loadConfig() {
   return Object.freeze({
     port,
     queueNames,
+    queueUrls,
     awsRegion,
     awsProfile,
     refreshIntervalMs,
@@ -68,4 +105,4 @@ function loadConfig() {
   });
 }
 
-module.exports = { loadConfig, validateRegion, validatePositiveInt, parseQueueNames };
+module.exports = { loadConfig, validateRegion, validatePositiveInt, parseQueueNames, parseQueueUrl, parseQueueUrls };

@@ -718,6 +718,6 @@ describe('startServer', () => {
   it('fails fast when queues are not configured', async () => {
     delete process.env.SQS_QUEUES;
     const { startServer } = loadApp();
-    await expect(startServer()).rejects.toThrow('SQS_QUEUES must include at least one queue name.');
+    await expect(startServer()).rejects.toThrow('SQS_QUEUES or SQS_QUEUE_URLS must include at least one entry');
   });
 });

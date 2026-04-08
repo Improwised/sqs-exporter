@@ -151,6 +151,49 @@ async function getSQSAttributes(queueName) {
   }
 }
 
+async function getSQSAttributesByUrl(queueName, queueUrl) {
+  try {
+    const command = new GetQueueAttributesCommand({
+      QueueUrl: queueUrl,
+      AttributeNames: [
+        'ApproximateNumberOfMessages',
+        'ApproximateNumberOfMessagesNotVisible',
+        'ApproximateNumberOfMessagesDelayed',
+        'ApproximateNumberOfGroupsWithInflightMessages'
+      ]
+    });
+
+    const data = await sqs.send(command);
+
+    sqsApproximateNumberOfMessagesVisible.set(
+      { queueName },
+      parseInt(data.Attributes.ApproximateNumberOfMessages, 10) || 0
+    );
+    sqsApproximateNumberOfMessagesNotVisible.set(
+      { queueName },
+      parseInt(data.Attributes.ApproximateNumberOfMessagesNotVisible, 10) || 0
+    );
+    sqsApproximateNumberOfMessagesDelayed.set(
+      { queueName },
+      parseInt(data.Attributes.ApproximateNumberOfMessagesDelayed, 10) || 0
+    );
+
+    if (data.Attributes.ApproximateNumberOfGroupsWithInflightMessages !== undefined) {
+      sqsApproximateNumberOfGroupsWithInflightMessages.set(
+        { queueName },
+        parseInt(data.Attributes.ApproximateNumberOfGroupsWithInflightMessages, 10) || 0
+      );
+    } else {
+      sqsApproximateNumberOfGroupsWithInflightMessages.reset({ queueName });
+    }
+
+    return data.Attributes;
+  } catch (error) {
+    console.error(`Failed to read queue attributes for "${queueName}" (URL: ${queueUrl}):`, error.message);
+    throw error;
+  }
+}
+
 async function boundedMap(items, fn, concurrency) {
   const results = new Array(items.length);
   let nextIndex = 0;
@@ -178,15 +221,27 @@ async function refreshOnce() {
   refreshing = true;
   const refreshStart = Date.now();
   try {
-    const queueNames = getConfig().queueNames;
-    const maxConcurrency = getConfig().maxConcurrency;
+    const cfg = getConfig();
+    const queueNames = cfg.queueNames;
+    const queueUrls = cfg.queueUrls;
+    const maxConcurrency = cfg.maxConcurrency;
+
+    const allTargets = [
+      ...queueNames.map((name) => ({ name, url: null, type: 'name' })),
+      ...queueUrls.map((u) => ({ name: u.name, url: u.url, type: 'url' }))
+    ];
 
     const rawResults = await boundedMap(
-      queueNames,
-      (queueName) => getSQSAttributes(queueName).then(
-        (value) => ({ status: 'fulfilled', value }),
-        (reason) => ({ status: 'rejected', reason })
-      ),
+      allTargets,
+      (target) => {
+        const promise = target.type === 'url'
+          ? getSQSAttributesByUrl(target.name, target.url)
+          : getSQSAttributes(target.name);
+        return promise.then(
+          (value) => ({ status: 'fulfilled', value, name: target.name }),
+          (reason) => ({ status: 'rejected', reason, name: target.name })
+        );
+      },
       maxConcurrency
     );
 
@@ -197,8 +252,8 @@ async function refreshOnce() {
     let successCount = 0;
     let failureCount = 0;
 
-    results.forEach((result, index) => {
-      const queueName = queueNames[index];
+    results.forEach((result) => {
+      const queueName = result.name;
       if (result.status === 'fulfilled') {
         anySuccess = true;
         successCount++;

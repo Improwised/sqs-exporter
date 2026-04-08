@@ -42,14 +42,14 @@ describe('loadConfig', () => {
     delete process.env.SQS_QUEUES;
     process.env.AWS_REGION = 'us-west-2';
 
-    expect(() => loadConfig()).toThrow('SQS_QUEUES must include at least one queue name.');
+    expect(() => loadConfig()).toThrow('SQS_QUEUES or SQS_QUEUE_URLS must include at least one entry');
   });
 
   it('throws on whitespace-only SQS_QUEUES', () => {
     process.env.SQS_QUEUES = '  ,  ,  ';
     process.env.AWS_REGION = 'us-west-2';
 
-    expect(() => loadConfig()).toThrow('SQS_QUEUES must include at least one queue name.');
+    expect(() => loadConfig()).toThrow('SQS_QUEUES or SQS_QUEUE_URLS must include at least one entry');
   });
 
   it('throws on invalid AWS_REGION', () => {
@@ -172,5 +172,58 @@ describe('loadConfig', () => {
     process.env.SQS_MAX_CONCURRENCY = 'abc';
 
     expect(() => loadConfig()).toThrow('SQS_MAX_CONCURRENCY must be a positive integer');
+  });
+
+  it('accepts SQS_QUEUE_URLS alongside SQS_QUEUES', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_QUEUE_URLS = 'https://sqs.us-east-1.amazonaws.com/123456789/queue-b';
+
+    const config = loadConfig();
+
+    expect(config.queueNames).toContain('queue-a');
+    expect(config.queueUrls).toEqual([{ url: 'https://sqs.us-east-1.amazonaws.com/123456789/queue-b', name: 'queue-b' }]);
+  });
+
+  it('runs with only SQS_QUEUE_URLS (no SQS_QUEUES)', () => {
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_QUEUE_URLS = 'https://sqs.us-west-2.amazonaws.com/123456789/my-queue';
+
+    const config = loadConfig();
+
+    expect(config.queueNames).toEqual([]);
+    expect(config.queueUrls).toEqual([{ url: 'https://sqs.us-west-2.amazonaws.com/123456789/my-queue', name: 'my-queue' }]);
+  });
+
+  it('throws when both SQS_QUEUES and SQS_QUEUE_URLS are empty', () => {
+    process.env.AWS_REGION = 'us-west-2';
+    delete process.env.SQS_QUEUES;
+    delete process.env.SQS_QUEUE_URLS;
+
+    expect(() => loadConfig()).toThrow('SQS_QUEUES or SQS_QUEUE_URLS must include at least one entry');
+  });
+
+  it('throws on invalid SQS_QUEUE_URLS format', () => {
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_QUEUE_URLS = 'not-a-url';
+
+    expect(() => loadConfig()).toThrow('SQS_QUEUE_URLS contains invalid URL');
+  });
+
+  it('derives queue name from URL', () => {
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_QUEUE_URLS = 'https://sqs.us-east-1.amazonaws.com/123456789012/my-fifo-queue.fifo';
+
+    const config = loadConfig();
+
+    expect(config.queueUrls[0].name).toBe('my-fifo-queue.fifo');
+  });
+
+  it('prevents duplicate queue names between SQS_QUEUES and SQS_QUEUE_URLS', () => {
+    process.env.SQS_QUEUES = 'my-queue';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_QUEUE_URLS = 'https://sqs.us-west-2.amazonaws.com/123456789/my-queue';
+
+    expect(() => loadConfig()).toThrow('Duplicate queue name');
   });
 });
