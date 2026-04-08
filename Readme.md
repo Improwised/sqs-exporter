@@ -1,23 +1,60 @@
-## Project Description
+# SQS Exporter
 
-This project is a Node.js application that integrates with AWS SQS and CloudWatch to monitor and report on the status of SQS queues. It uses the `@aws-sdk/client-sqs` and `@aws-sdk/client-cloudwatch` packages to interact with AWS services and `prom-client` to create custom Prometheus metrics. The application provides an HTTP server that responds to `/ping` requests and serves Prometheus metrics at the `/metrics` endpoint.
+SQS Exporter is a small Node.js service that exposes Prometheus metrics for one or more AWS SQS queues.
 
-## Running the Project
+It polls queue attributes from AWS SQS and publishes these metrics:
 
-To run this project, you will need Node.js and npm installed on your machine. Follow these steps:
+- `sqs_approximate_number_of_messages`
+- `sqs_approximate_number_of_messages_not_visible`
+- `sqs_approximate_number_of_messages_delayed`
 
-1. Clone the repository to your local machine.
-2. Navigate to the project directory in your terminal.
-3. Install the dependencies by running `npm install`.
-4. Set the required environment variables:
-   - `AWS_ACCESS_KEY_ID`: Your AWS access key ID.
-   - `AWS_SECRET_ACCESS_KEY`: Your AWS secret access key.
-   - `AWS_REGION`: The AWS region your SQS queues are located in.
-   - `AWS_PROFILE`: (Optional) The AWS profile to use from your credentials file.
-   - `SQS_QUEUES`: A comma-separated list of SQS queue names to monitor.
-   - `PORT`: (Optional) The port number for the HTTP server (default is 3001).
-5. Start the server by running `npm start` or `node app.js`.
-6. Access the `/ping` endpoint in your browser or using a tool like `curl` to check if the server is running.
-7. Access the `/metrics` endpoint to view the Prometheus metrics.
+## Requirements
 
-Make sure you have the necessary AWS permissions to access SQS and CloudWatch.
+- Node.js 18+
+- Access to AWS SQS with permission to call:
+  - `sqs:GetQueueUrl`
+  - `sqs:GetQueueAttributes`
+
+## Installation
+
+```bash
+npm install
+```
+
+## Configuration
+
+Set these environment variables before starting the service:
+
+- `SQS_QUEUES` (required): comma-separated queue names, for example `orders,notifications`
+- `AWS_REGION` (optional): AWS region, defaults to `us-west-2`
+- `AWS_PROFILE` (optional): local AWS profile name from `~/.aws/credentials`
+- `PORT` (optional): HTTP port, defaults to `3001`
+
+### Authentication
+
+If `AWS_PROFILE` is set, the exporter uses that profile via shared credentials.
+
+If `AWS_PROFILE` is not set, AWS SDK default credential resolution is used (for example environment variables, IAM role, ECS task role).
+
+## Run
+
+```bash
+npm start
+```
+
+Server startup will fail fast with a clear error when:
+
+- `SQS_QUEUES` is missing or empty
+- `AWS_REGION` is invalid
+- `AWS_PROFILE` is set but cannot be loaded
+
+## Endpoints
+
+- `GET /ping`: basic health check, returns `pong`
+- `GET /metrics`: Prometheus metrics output
+
+## Local Testing
+
+```bash
+npm test
+```

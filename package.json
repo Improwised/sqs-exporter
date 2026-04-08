@@ -5,7 +5,9 @@
   "private": true,
   "main": "app.js",
   "scripts": {
-    "test": "jest"
+    "start": "node app.js",
+    "test": "jest",
+    "test:watch": "jest --watch"
   },
   "keywords": [],
   "author": "",
