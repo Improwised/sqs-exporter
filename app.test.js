@@ -1,22 +1,53 @@
 const request = require('supertest');
-const { app, startServer, stopServer } = require('./app');
-const AWSMock = require('aws-sdk-mock');
-const { SQSClient } = require('@aws-sdk/client-sqs');
 
-// Mock AWS SQS and CloudWatch services
-AWSMock.setSDKInstance(SQSClient);
+const mockSend = jest.fn();
 
+jest.mock('@aws-sdk/client-sqs', () => {
+  class SQSClient {
+    constructor() {
+      this.send = mockSend;
+    }
+  }
+
+  class GetQueueUrlCommand {
+    constructor(input) {
+      this.input = input;
+    }
+  }
+
+  class GetQueueAttributesCommand {
+    constructor(input) {
+      this.input = input;
+    }
+  }
+
+  return { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand };
+});
+
+jest.mock('@aws-sdk/client-cloudwatch', () => {
+  return { CloudWatchClient: jest.fn() };
+});
+
+const originalEnv = process.env;
+
+function loadApp() {
+  jest.resetModules();
+  return require('./app');
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  process.env = { ...originalEnv, AWS_REGION: 'us-west-2' };
+  delete process.env.AWS_PROFILE;
+});
+
+afterAll(() => {
+  process.env = originalEnv;
+});
 
 describe('GET /ping', () => {
-  beforeAll(() => {
-    startServer();
-  });
-
-  afterAll(() => {
-    stopServer();
-  });
-
   it('responds with pong', async () => {
+    const { app } = loadApp();
     const response = await request(app).get('/ping');
     expect(response.statusCode).toBe(200);
     expect(response.text).toBe('pong');
@@ -24,32 +55,41 @@ describe('GET /ping', () => {
 });
 
 describe('GET /metrics', () => {
-  beforeAll(() => {
-    AWSMock.mock('SQS', 'getQueueUrl', (params, callback) => {
-      callback(null, { QueueUrl: `http://example.com/${params.QueueName}` });
+  it('responds with metrics for configured queues', async () => {
+    process.env.SQS_QUEUES = 'queue-a,queue-b';
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+      }
+
+      if (command.input.QueueUrl) {
+        return {
+          Attributes: {
+            ApproximateNumberOfMessages: '10',
+            ApproximateNumberOfMessagesNotVisible: '5',
+            ApproximateNumberOfMessagesDelayed: '2'
+          }
+        };
+      }
+
+      return {};
     });
 
-    AWSMock.mock('SQS', 'getQueueAttributes', (params, callback) => {
-      callback(null, {
-        Attributes: {
-          ApproximateNumberOfMessages: '10',
-          ApproximateNumberOfMessagesNotVisible: '5',
-          ApproximateNumberOfMessagesDelayed: '2'
-        }
-      });
-    });
-  });
-
-  afterAll(() => {
-    AWSMock.restore('SQSClient');
-  });
-
-  it('responds with metrics', async () => {
-    process.env.SQS_QUEUES = 'testQueue';
+    const { app } = loadApp();
     const response = await request(app).get('/metrics');
+
     expect(response.statusCode).toBe(200);
     expect(response.text).toContain('sqs_approximate_number_of_messages');
-    expect(response.text).toContain('sqs_approximate_number_of_messages_not_visible');
-    expect(response.text).toContain('sqs_approximate_number_of_messages_delayed');
+    expect(response.text).toContain('queueName="queue-a"');
+    expect(response.text).toContain('queueName="queue-b"');
+  });
+});
+
+describe('startServer', () => {
+  it('fails fast when queues are not configured', async () => {
+    delete process.env.SQS_QUEUES;
+    const { startServer } = loadApp();
+    await expect(startServer()).rejects.toThrow('SQS_QUEUES must include at least one queue name.');
   });
 });
