@@ -4,11 +4,17 @@ const { fromIni } = require('@aws-sdk/credential-provider-ini');
 const client = require('prom-client');
 
 let server;
+let refreshTimer = null;
+let refreshing = false;
+let ready = false;
+let consecutiveFailures = 0;
+const MAX_BACKOFF_MULTIPLIER = 32;
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
 const awsProfile = process.env.AWS_PROFILE;
 const awsRegion = process.env.AWS_REGION || 'us-west-2';
+const REFRESH_INTERVAL_MS = Number(process.env.METRICS_REFRESH_INTERVAL_MS || 15000);
 
 function parseQueueNames() {
   if (!process.env.SQS_QUEUES) {
@@ -120,14 +126,69 @@ async function getSQSAttributes(queueName) {
   }
 }
 
+async function refreshOnce() {
+  if (refreshing) {
+    return;
+  }
+
+  refreshing = true;
+  try {
+    const queueNames = parseQueueNames();
+    await Promise.all(queueNames.map((queueName) => getSQSAttributes(queueName)));
+    consecutiveFailures = 0;
+    ready = true;
+  } catch (error) {
+    consecutiveFailures++;
+    throw error;
+  } finally {
+    refreshing = false;
+  }
+}
+
+function getBackoffDelay() {
+  const multiplier = Math.min(Math.pow(2, consecutiveFailures), MAX_BACKOFF_MULTIPLIER);
+  return REFRESH_INTERVAL_MS * multiplier;
+}
+
+function scheduleRefresh() {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+  }
+
+  const delay = getBackoffDelay();
+  refreshTimer = setTimeout(async () => {
+    try {
+      await refreshOnce();
+    } catch (_) {}
+    scheduleRefresh();
+  }, delay);
+}
+
+function stopRefreshLoop() {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+function isReady() {
+  return ready;
+}
+
 app.get('/ping', (req, res) => {
   res.status(200).send('pong');
 });
 
+app.get('/ready', (req, res) => {
+  if (isReady()) {
+    res.status(200).send('ready');
+  } else {
+    res.status(503).send('not ready');
+  }
+});
+
 app.get('/metrics', async (req, res) => {
   try {
-    const queueNames = parseQueueNames();
-    await Promise.all(queueNames.map((queueName) => getSQSAttributes(queueName)));
     const metrics = await register.metrics();
     res.set('Content-Type', register.contentType);
     res.end(metrics);
@@ -153,6 +214,8 @@ async function startServer() {
 }
 
 function stopServer() {
+  stopRefreshLoop();
+
   if (!server) {
     return Promise.resolve();
   }
@@ -165,6 +228,8 @@ function stopServer() {
       }
 
       server = undefined;
+      ready = false;
+      consecutiveFailures = 0;
       resolve();
     });
   });
@@ -177,12 +242,28 @@ module.exports = {
   getQueueUrl,
   getSQSAttributes,
   parseQueueNames,
-  validateRuntimeConfiguration
+  validateRuntimeConfiguration,
+  refreshOnce,
+  scheduleRefresh,
+  isReady,
+  stopRefreshLoop,
+  getBackoffDelay
 };
 
 if (require.main === module) {
-  startServer().catch((error) => {
-    console.error(`Failed to start server: ${error.message}`);
-    process.exit(1);
-  });
+  startServer()
+    .then(async () => {
+      try {
+        await refreshOnce();
+        console.log('Initial refresh completed successfully');
+      } catch (error) {
+        console.error(`Initial refresh failed: ${error.message}`);
+        process.exit(1);
+      }
+      scheduleRefresh();
+    })
+    .catch((error) => {
+      console.error(`Failed to start server: ${error.message}`);
+      process.exit(1);
+    });
 }
