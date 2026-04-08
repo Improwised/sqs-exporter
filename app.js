@@ -8,8 +8,10 @@ let refreshTimer = null;
 let refreshing = false;
 let ready = false;
 let consecutiveFailures = 0;
+let shuttingDown = false;
 const MAX_BACKOFF_MULTIPLIER = 32;
 const queueState = {};
+const queueUrlCache = {};
 
 const app = express();
 
@@ -56,9 +58,14 @@ register.registerMetric(sqsExporterQueueUp);
 let sqs = null;
 
 async function getQueueUrl(queueName) {
+  if (queueUrlCache[queueName]) {
+    return queueUrlCache[queueName];
+  }
+
   try {
     const command = new GetQueueUrlCommand({ QueueName: queueName });
     const data = await sqs.send(command);
+    queueUrlCache[queueName] = data.QueueUrl;
     return data.QueueUrl;
   } catch (error) {
     console.error(`Failed to resolve queue URL for "${queueName}":`, error.message);
@@ -95,6 +102,7 @@ async function getSQSAttributes(queueName) {
 
     return data.Attributes;
   } catch (error) {
+    delete queueUrlCache[queueName];
     console.error(`Failed to read queue attributes for "${queueName}":`, error.message);
     throw error;
   }
@@ -240,8 +248,6 @@ app.use((error, req, res, next) => {
   res.status(500).send('Internal server error.');
 });
 
-let shuttingDown = false;
-
 async function startServer() {
   validateRuntimeConfiguration();
   sqs = new SQSClient(getConfig().sqsConfig);
@@ -302,6 +308,7 @@ function stopServer() {
       consecutiveFailures = 0;
       shuttingDown = false;
       Object.keys(queueState).forEach((k) => delete queueState[k]);
+      Object.keys(queueUrlCache).forEach((k) => delete queueUrlCache[k]);
       resolve();
     });
   });

@@ -436,6 +436,93 @@ describe('per-queue failure isolation', () => {
   });
 });
 
+describe('queue URL cache', () => {
+  it('caches queue URL after first lookup', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+
+    mockSuccessfulSqs();
+
+    const { startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    mockSend.mockClear();
+    await refreshOnce();
+
+    const getQueueUrlCalls = mockSend.mock.calls.filter(
+      (c) => c[0].input && c[0].input.QueueName
+    );
+    expect(getQueueUrlCalls.length).toBe(0);
+
+    await stopServer();
+  });
+
+  it('invalidates cache on queue-not-found error', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+
+    let callCount = 0;
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName) {
+        callCount++;
+        if (callCount > 1) {
+          const err = new Error('Queue does not exist');
+          err.name = 'QueueDoesNotExist';
+          throw err;
+        }
+        return { QueueUrl: 'https://example.com/queue-a' };
+      }
+      if (command.input.QueueUrl) {
+        return {
+          Attributes: {
+            ApproximateNumberOfMessages: '5',
+            ApproximateNumberOfMessagesNotVisible: '0',
+            ApproximateNumberOfMessagesDelayed: '0'
+          }
+        };
+      }
+      return {};
+    });
+
+    const { startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const err = new Error('Queue does not exist');
+    err.name = 'QueueDoesNotExist';
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName) {
+        throw err;
+      }
+      throw err;
+    });
+
+    await refreshOnce();
+
+    mockSend.mockClear();
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName) {
+        return { QueueUrl: 'https://example.com/queue-a-new' };
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '3',
+          ApproximateNumberOfMessagesNotVisible: '0',
+          ApproximateNumberOfMessagesDelayed: '0'
+        }
+      };
+    });
+
+    await refreshOnce();
+
+    const queueUrlCalls = mockSend.mock.calls.filter(
+      (c) => c[0].input && c[0].input.QueueName
+    );
+    expect(queueUrlCalls.length).toBe(1);
+
+    await stopServer();
+  });
+});
+
 describe('graceful shutdown', () => {
   it('stopServer stops the refresh loop and HTTP server', async () => {
     process.env.SQS_QUEUES = 'queue-a';
