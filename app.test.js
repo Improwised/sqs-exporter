@@ -24,10 +24,6 @@ jest.mock('@aws-sdk/client-sqs', () => {
   return { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand };
 });
 
-jest.mock('@aws-sdk/client-cloudwatch', () => {
-  return { CloudWatchClient: jest.fn() };
-});
-
 const originalEnv = process.env;
 
 function loadApp() {
