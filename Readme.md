@@ -29,6 +29,7 @@ Set these environment variables before starting the service:
 - `AWS_REGION` (optional): AWS region, defaults to `us-west-2`
 - `AWS_PROFILE` (optional): local AWS profile name from `~/.aws/credentials`
 - `PORT` (optional): HTTP port, defaults to `3001`
+- `METRICS_REFRESH_INTERVAL_MS` (optional): background refresh interval in milliseconds, defaults to `15000`
 
 ### Authentication
 
@@ -46,12 +47,45 @@ Server startup will fail fast with a clear error when:
 
 - `SQS_QUEUES` is missing or empty
 - `AWS_REGION` is invalid
+- `PORT` is not a positive integer
+- `METRICS_REFRESH_INTERVAL_MS` is not a positive integer
 - `AWS_PROFILE` is set but cannot be loaded
+
+## Docker
+
+```bash
+docker build -t sqs-exporter .
+
+docker run -e SQS_QUEUES=my-queue -e AWS_REGION=us-east-1 -p 3001:3001 sqs-exporter
+```
+
+The container runs as a non-root user. A healthcheck against `/ping` is configured by default.
 
 ## Endpoints
 
 - `GET /ping`: basic health check, returns `pong`
-- `GET /metrics`: Prometheus metrics output
+- `GET /ready`: readiness check, returns `200` after first successful metric refresh, `503` before
+- `GET /metrics`: Prometheus metrics output (served from cache, no on-demand AWS calls)
+
+## Resource Recommendations
+
+| Resource | Recommended Limit | Notes |
+|----------|-------------------|-------|
+| CPU | 100m | Sufficient for up to ~100 queues |
+| Memory | 128Mi | Includes Node.js runtime overhead |
+| CPU (high queue count) | 250m | 100+ queues with short refresh intervals |
+| Memory (high queue count) | 256Mi | 100+ queues with short refresh intervals |
+
+## Metric Cardinality
+
+Each monitored queue contributes approximately **4 time series** (3 SQS gauges + default Node.js metrics). Plan Prometheus capacity accordingly:
+
+| Queues | Approximate Time Series |
+|--------|------------------------|
+| 10 | ~40 |
+| 50 | ~200 |
+| 100 | ~400 |
+| 500 | ~2000 |
 
 ## Local Testing
 
