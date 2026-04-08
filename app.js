@@ -6,99 +6,57 @@ const client = require('prom-client');
 
 let server;
 
-// Set up Express web server
 const app = express();
-const PORT = process.env.PORT || 3001;
-const aws_access_key_id = process.env.AWS_ACCESS_KEY_ID;
-const aws_secret_access_key = process.env.AWS_SECRET_ACCESS_KEY;
-
-// Add code here for handling errors and logging
-app.use((err, req, res, next) => {
-  console.error('Error:', err.stack);
-  res.status(500).send('Something went wrong.');
-});
-
-app.get('/ping', (req, res) => {
-  console.log('Received a GET request at /ping');
-  res.status(200).send('pong');
-});
-
-
-function startServer() {
-  server = app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-  });
-}
-
-function stopServer() {
-  if (server) {
-    server.close();
-  }
-}
-
-// Set up AWS SDK
-const awsProfile = process.env.AWS_PROFILE || 'default';
-const awsCredentials = fromIni({ profile: awsProfile });
+const PORT = Number(process.env.PORT || 3001);
+const awsProfile = process.env.AWS_PROFILE;
 const awsRegion = process.env.AWS_REGION || 'us-west-2';
 
-const sqs = new SQSClient({ region: awsRegion, credentials: awsCredentials });
-const cloudwatch = new CloudWatchClient({ region: awsRegion, credentials: awsCredentials });
+function parseQueueNames() {
+  if (!process.env.SQS_QUEUES) {
+    return [];
+  }
 
+  return process.env.SQS_QUEUES
+    .split(',')
+    .map((queueName) => queueName.trim())
+    .filter(Boolean);
+}
 
-// Add code here for handling errors and logging
-async function getQueueUrl(queueName) {
-  try {
-    const params = { QueueName: queueName };
-    const command = new GetQueueUrlCommand(params);
-    const data = await sqs.send(command);
-    return data.QueueUrl;
-  } catch (error) {
-    console.error('Error:', error.stack);
-    throw error;
+function validateRegion(region) {
+  return /^[a-z]{2}-[a-z]+-\d+$/.test(region);
+}
+
+async function validateRuntimeConfiguration() {
+  const queueNames = parseQueueNames();
+
+  if (queueNames.length === 0) {
+    throw new Error('SQS_QUEUES must include at least one queue name.');
+  }
+
+  if (!validateRegion(awsRegion)) {
+    throw new Error(`AWS_REGION is invalid: "${awsRegion}"`);
+  }
+
+  if (awsProfile) {
+    try {
+      await fromIni({ profile: awsProfile })();
+    } catch (error) {
+      throw new Error(`Unable to load AWS profile "${awsProfile}". ${error.message}`);
+    }
   }
 }
 
-// Add code here for handling errors and logging
-async function getSQSAttributes(queueName) {
-  try {
-    const queueUrl = await getQueueUrl(queueName);
-    const params = {
-      QueueUrl: queueUrl,
-      AttributeNames: [
-        'ApproximateNumberOfMessages',
-        'ApproximateNumberOfMessagesNotVisible',
-        'ApproximateNumberOfMessagesDelayed'
-      ]
-    };
-    const command = new GetQueueAttributesCommand(params);
-    const data = await sqs.send(command);
-
-    // Set the custom metrics with the values from SQS attributes
-    sqsApproximateNumberOfMessagesVisible.set({queueName}, parseInt(data.Attributes.ApproximateNumberOfMessages) || 0);
-    sqsApproximateNumberOfMessagesNotVisible.set({queueName}, parseInt(data.Attributes.ApproximateNumberOfMessagesNotVisible) || 0);
-    sqsApproximateNumberOfMessagesDelayed.set({queueName}, parseInt(data.Attributes.ApproximateNumberOfMessagesDelayed) || 0);
-
-    return data.Attributes; // Keep returning the raw attributes for any other potential use
-  } catch (error) {
-    console.error('Error:', error.stack);
-    throw error;
-  }
+const sqsConfig = { region: awsRegion };
+if (awsProfile) {
+  sqsConfig.credentials = fromIni({ profile: awsProfile });
 }
 
-module.exports = {
-  app,
-  startServer,
-  stopServer,
-  getQueueUrl,
-  getSQSAttributes
-};
-// Create a Prometheus Registry
+const sqs = new SQSClient(sqsConfig);
+const cloudwatch = new CloudWatchClient(sqsConfig);
+
 const register = new client.Registry();
-
-// Enable the collection of default metrics
 client.collectDefaultMetrics({ register });
 
-// Define custom metrics for SQS
 const sqsApproximateNumberOfMessagesVisible = new client.Gauge({
   name: 'sqs_approximate_number_of_messages',
   help: 'Approximate number of messages in the SQS queue',
@@ -119,15 +77,107 @@ register.registerMetric(sqsApproximateNumberOfMessagesVisible);
 register.registerMetric(sqsApproximateNumberOfMessagesNotVisible);
 register.registerMetric(sqsApproximateNumberOfMessagesDelayed);
 
-// Endpoint to serve the metrics
+async function getQueueUrl(queueName) {
+  try {
+    const command = new GetQueueUrlCommand({ QueueName: queueName });
+    const data = await sqs.send(command);
+    return data.QueueUrl;
+  } catch (error) {
+    console.error(`Failed to resolve queue URL for "${queueName}":`, error.message);
+    throw error;
+  }
+}
+
+async function getSQSAttributes(queueName) {
+  try {
+    const queueUrl = await getQueueUrl(queueName);
+    const command = new GetQueueAttributesCommand({
+      QueueUrl: queueUrl,
+      AttributeNames: [
+        'ApproximateNumberOfMessages',
+        'ApproximateNumberOfMessagesNotVisible',
+        'ApproximateNumberOfMessagesDelayed'
+      ]
+    });
+
+    const data = await sqs.send(command);
+
+    sqsApproximateNumberOfMessagesVisible.set(
+      { queueName },
+      parseInt(data.Attributes.ApproximateNumberOfMessages, 10) || 0
+    );
+    sqsApproximateNumberOfMessagesNotVisible.set(
+      { queueName },
+      parseInt(data.Attributes.ApproximateNumberOfMessagesNotVisible, 10) || 0
+    );
+    sqsApproximateNumberOfMessagesDelayed.set(
+      { queueName },
+      parseInt(data.Attributes.ApproximateNumberOfMessagesDelayed, 10) || 0
+    );
+
+    return data.Attributes;
+  } catch (error) {
+    console.error(`Failed to read queue attributes for "${queueName}":`, error.message);
+    throw error;
+  }
+}
+
+app.get('/ping', (req, res) => {
+  res.status(200).send('pong');
+});
+
 app.get('/metrics', async (req, res) => {
   try {
-    const queueNames = process.env.SQS_QUEUES ? process.env.SQS_QUEUES.split(',') : [];
-    await Promise.all(queueNames.map(queueName => getSQSAttributes(queueName)));
+    const queueNames = parseQueueNames();
+    await Promise.all(queueNames.map((queueName) => getSQSAttributes(queueName)));
     const metrics = await register.metrics();
     res.set('Content-Type', register.contentType);
     res.end(metrics);
-  } catch (err) {
-    res.status(500).end(err);
+  } catch (error) {
+    res.status(500).send(`Failed to collect metrics: ${error.message}`);
   }
 });
+
+app.use((error, req, res, next) => {
+  console.error('Unhandled server error:', error.stack);
+  res.status(500).send('Internal server error.');
+});
+
+async function startServer() {
+  await validateRuntimeConfiguration();
+
+  return new Promise((resolve) => {
+    server = app.listen(PORT, () => {
+      console.log(`Server is running on port ${PORT}`);
+      resolve(server);
+    });
+  });
+}
+
+function stopServer() {
+  if (!server) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      server = undefined;
+      resolve();
+    });
+  });
+}
+
+module.exports = {
+  app,
+  startServer,
+  stopServer,
+  getQueueUrl,
+  getSQSAttributes,
+  parseQueueNames,
+  validateRuntimeConfiguration
+};
