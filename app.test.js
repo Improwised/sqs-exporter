@@ -163,15 +163,16 @@ describe('refreshOnce', () => {
     await stopServer();
   });
 
-  it('increments consecutive failures on error', async () => {
+  it('increments consecutive failures when all queues fail', async () => {
     process.env.SQS_QUEUES = 'queue-a';
 
     mockSend.mockRejectedValue(new Error('AWS unavailable'));
 
-    const { refreshOnce, startServer, stopServer } = loadApp();
+    const { refreshOnce, startServer, stopServer, getBackoffDelay } = loadApp();
     await startServer();
 
-    await expect(refreshOnce()).rejects.toThrow('AWS unavailable');
+    await refreshOnce();
+    expect(getBackoffDelay()).toBeGreaterThan(15000);
 
     await stopServer();
   });
@@ -187,11 +188,183 @@ describe('adaptive backoff', () => {
     const { refreshOnce, startServer, stopServer, getBackoffDelay } = loadApp();
     await startServer();
 
-    await expect(refreshOnce()).rejects.toThrow();
+    await refreshOnce();
 
     const backoffDelay = getBackoffDelay();
     expect(backoffDelay).toBeGreaterThan(1000);
 
+    await stopServer();
+  });
+});
+
+describe('per-queue failure isolation', () => {
+  it('one failing queue does not cause /metrics to return 500', async () => {
+    process.env.SQS_QUEUES = 'queue-good,queue-bad';
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName === 'queue-bad') {
+        throw new Error('Access denied');
+      }
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+      }
+      if (command.input.QueueUrl) {
+        return {
+          Attributes: {
+            ApproximateNumberOfMessages: '10',
+            ApproximateNumberOfMessagesNotVisible: '5',
+            ApproximateNumberOfMessagesDelayed: '2'
+          }
+        };
+      }
+      return {};
+    });
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.statusCode).toBe(200);
+
+    await stopServer();
+  });
+
+  it('reports queue_up=1 for healthy queues and queue_up=0 for failed queues', async () => {
+    process.env.SQS_QUEUES = 'queue-good,queue-bad';
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName === 'queue-bad') {
+        throw new Error('Access denied');
+      }
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+      }
+      if (command.input.QueueUrl) {
+        return {
+          Attributes: {
+            ApproximateNumberOfMessages: '10',
+            ApproximateNumberOfMessagesNotVisible: '5',
+            ApproximateNumberOfMessagesDelayed: '2'
+          }
+        };
+      }
+      return {};
+    });
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_exporter_queue_up{queueName="queue-good"} 1');
+    expect(response.text).toContain('sqs_exporter_queue_up{queueName="queue-bad"} 0');
+
+    await stopServer();
+  });
+
+  it('still publishes metrics for healthy queues when one fails', async () => {
+    process.env.SQS_QUEUES = 'queue-good,queue-bad';
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName === 'queue-bad') {
+        throw new Error('Access denied');
+      }
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+      }
+      if (command.input.QueueUrl) {
+        return {
+          Attributes: {
+            ApproximateNumberOfMessages: '10',
+            ApproximateNumberOfMessagesNotVisible: '5',
+            ApproximateNumberOfMessagesDelayed: '2'
+          }
+        };
+      }
+      return {};
+    });
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('queueName="queue-good"');
+    expect(response.text).toContain('sqs_approximate_number_of_messages{queueName="queue-good"}');
+
+    await stopServer();
+  });
+
+  it('zeros out stale metrics for failed queues', async () => {
+    process.env.SQS_QUEUES = 'queue-failing';
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '100',
+          ApproximateNumberOfMessagesNotVisible: '50',
+          ApproximateNumberOfMessagesDelayed: '20'
+        }
+      };
+    });
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    let response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_approximate_number_of_messages{queueName="queue-failing"} 100');
+
+    mockSend.mockRejectedValue(new Error('AWS unavailable'));
+    await refreshOnce();
+
+    response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_approximate_number_of_messages{queueName="queue-failing"} 0');
+
+    await stopServer();
+  });
+
+  it('logs state transition from UP to DOWN only once', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '5',
+          ApproximateNumberOfMessagesNotVisible: '0',
+          ApproximateNumberOfMessagesDelayed: '0'
+        }
+      };
+    });
+
+    const { startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    mockSend.mockRejectedValue(new Error('AWS unavailable'));
+    await refreshOnce();
+
+    const downLogs = consoleSpy.mock.calls.filter((c) =>
+      c[0].includes('queue-a') && c[0].includes('DOWN')
+    );
+    expect(downLogs.length).toBe(1);
+
+    await refreshOnce();
+    const downLogs2 = consoleSpy.mock.calls.filter((c) =>
+      c[0].includes('queue-a') && c[0].includes('DOWN')
+    );
+    expect(downLogs2.length).toBe(1);
+
+    consoleSpy.mockRestore();
     await stopServer();
   });
 });

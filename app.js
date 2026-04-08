@@ -9,6 +9,7 @@ let refreshing = false;
 let ready = false;
 let consecutiveFailures = 0;
 const MAX_BACKOFF_MULTIPLIER = 32;
+const queueState = {};
 
 const app = express();
 
@@ -44,6 +45,13 @@ const sqsApproximateNumberOfMessagesDelayed = new client.Gauge({
 register.registerMetric(sqsApproximateNumberOfMessagesVisible);
 register.registerMetric(sqsApproximateNumberOfMessagesNotVisible);
 register.registerMetric(sqsApproximateNumberOfMessagesDelayed);
+
+const sqsExporterQueueUp = new client.Gauge({
+  name: 'sqs_exporter_queue_up',
+  help: 'Whether the queue is accessible: 1 for UP, 0 for DOWN',
+  labelNames: ['queueName']
+});
+register.registerMetric(sqsExporterQueueUp);
 
 let sqs = null;
 
@@ -100,12 +108,48 @@ async function refreshOnce() {
   refreshing = true;
   try {
     const queueNames = getConfig().queueNames;
-    await Promise.all(queueNames.map((queueName) => getSQSAttributes(queueName)));
-    consecutiveFailures = 0;
-    ready = true;
-  } catch (error) {
-    consecutiveFailures++;
-    throw error;
+    const results = await Promise.allSettled(
+      queueNames.map((queueName) => getSQSAttributes(queueName))
+    );
+
+    let anySuccess = false;
+    let anyFailure = false;
+
+    results.forEach((result, index) => {
+      const queueName = queueNames[index];
+      if (result.status === 'fulfilled') {
+        anySuccess = true;
+        sqsExporterQueueUp.set({ queueName }, 1);
+        if (queueState[queueName] === 'DOWN') {
+          console.error(`Queue "${queueName}" transitioned DOWN -> UP`);
+          queueState[queueName] = 'UP';
+        } else {
+          queueState[queueName] = 'UP';
+        }
+      } else {
+        anyFailure = true;
+        sqsExporterQueueUp.set({ queueName }, 0);
+        sqsApproximateNumberOfMessagesVisible.set({ queueName }, 0);
+        sqsApproximateNumberOfMessagesNotVisible.set({ queueName }, 0);
+        sqsApproximateNumberOfMessagesDelayed.set({ queueName }, 0);
+        if (queueState[queueName] === 'UP') {
+          console.error(`Queue "${queueName}" transitioned UP -> DOWN: ${result.reason.message}`);
+          queueState[queueName] = 'DOWN';
+        } else if (!queueState[queueName]) {
+          console.error(`Queue "${queueName}" is DOWN: ${result.reason.message}`);
+          queueState[queueName] = 'DOWN';
+        }
+      }
+    });
+
+    if (anySuccess) {
+      consecutiveFailures = 0;
+      ready = true;
+    }
+
+    if (anyFailure && !anySuccess) {
+      consecutiveFailures++;
+    }
   } finally {
     refreshing = false;
   }
@@ -199,6 +243,7 @@ function stopServer() {
       config = null;
       ready = false;
       consecutiveFailures = 0;
+      Object.keys(queueState).forEach((k) => delete queueState[k]);
       resolve();
     });
   });
@@ -223,13 +268,12 @@ module.exports = {
 if (require.main === module) {
   startServer()
     .then(async () => {
-      try {
-        await refreshOnce();
-        console.log('Initial refresh completed successfully');
-      } catch (error) {
-        console.error(`Initial refresh failed: ${error.message}`);
+      await refreshOnce();
+      if (!isReady()) {
+        console.error('Initial refresh failed: no queues could be fetched');
         process.exit(1);
       }
+      console.log('Initial refresh completed successfully');
       scheduleRefresh();
     })
     .catch((error) => {
