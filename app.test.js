@@ -197,6 +197,73 @@ describe('adaptive backoff', () => {
   });
 });
 
+describe('bounded concurrency', () => {
+  it('respects SQS_MAX_CONCURRENCY=1 (serial execution)', async () => {
+    process.env.SQS_QUEUES = 'q1,q2,q3';
+    process.env.SQS_MAX_CONCURRENCY = '1';
+
+    const callOrder = [];
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName) {
+        callOrder.push(command.input.QueueName);
+        return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '1',
+          ApproximateNumberOfMessagesNotVisible: '0',
+          ApproximateNumberOfMessagesDelayed: '0'
+        }
+      };
+    });
+
+    const { refreshOnce, startServer, stopServer } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    expect(callOrder).toEqual(['q1', 'q2', 'q3']);
+
+    await stopServer();
+  });
+
+  it('allows parallel execution when SQS_MAX_CONCURRENCY > 1', async () => {
+    process.env.SQS_QUEUES = 'q1,q2,q3,q4';
+    process.env.SQS_MAX_CONCURRENCY = '2';
+
+    let maxConcurrent = 0;
+    let currentConcurrent = 0;
+
+    mockSend.mockImplementation(async (command) => {
+      currentConcurrent++;
+      maxConcurrent = Math.max(maxConcurrent, currentConcurrent);
+      try {
+        if (command.input.QueueName) {
+          return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+        }
+        await new Promise((r) => setTimeout(r, 20));
+        return {
+          Attributes: {
+            ApproximateNumberOfMessages: '1',
+            ApproximateNumberOfMessagesNotVisible: '0',
+            ApproximateNumberOfMessagesDelayed: '0'
+          }
+        };
+      } finally {
+        currentConcurrent--;
+      }
+    });
+
+    const { refreshOnce, startServer, stopServer } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    expect(maxConcurrent).toBeLessThanOrEqual(4);
+    expect(maxConcurrent).toBeGreaterThan(1);
+
+    await stopServer();
+  });
+});
+
 describe('per-queue failure isolation', () => {
   it('one failing queue does not cause /metrics to return 500', async () => {
     process.env.SQS_QUEUES = 'queue-good,queue-bad';

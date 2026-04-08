@@ -43,6 +43,10 @@ function loadConfig() {
   );
 
   const awsProfile = process.env.AWS_PROFILE;
+  const maxConcurrency = validatePositiveInt(
+    process.env.SQS_MAX_CONCURRENCY || 5,
+    'SQS_MAX_CONCURRENCY'
+  );
   const sqsConfig = { region: awsRegion };
   if (awsProfile) {
     sqsConfig.credentials = fromIni({ profile: awsProfile });
@@ -54,6 +58,7 @@ function loadConfig() {
     awsRegion,
     awsProfile,
     refreshIntervalMs,
+    maxConcurrency,
     sqsConfig
   });
 }

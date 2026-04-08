@@ -100,6 +100,25 @@ async function getSQSAttributes(queueName) {
   }
 }
 
+async function boundedMap(items, fn, concurrency) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await fn(items[index], index);
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    () => worker()
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 async function refreshOnce() {
   if (refreshing) {
     return;
@@ -108,9 +127,18 @@ async function refreshOnce() {
   refreshing = true;
   try {
     const queueNames = getConfig().queueNames;
-    const results = await Promise.allSettled(
-      queueNames.map((queueName) => getSQSAttributes(queueName))
+    const maxConcurrency = getConfig().maxConcurrency;
+
+    const rawResults = await boundedMap(
+      queueNames,
+      (queueName) => getSQSAttributes(queueName).then(
+        (value) => ({ status: 'fulfilled', value }),
+        (reason) => ({ status: 'rejected', reason })
+      ),
+      maxConcurrency
     );
+
+    const results = rawResults;
 
     let anySuccess = false;
     let anyFailure = false;

@@ -139,4 +139,38 @@ describe('loadConfig', () => {
     expect(config.sqsConfig.region).toBe('us-west-2');
     expect(config.sqsConfig.credentials).toBeDefined();
   });
+
+  it('defaults SQS_MAX_CONCURRENCY to 5', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    delete process.env.SQS_MAX_CONCURRENCY;
+
+    const config = loadConfig();
+
+    expect(config.maxConcurrency).toBe(5);
+  });
+
+  it('throws on zero SQS_MAX_CONCURRENCY', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_MAX_CONCURRENCY = '0';
+
+    expect(() => loadConfig()).toThrow('SQS_MAX_CONCURRENCY must be a positive integer');
+  });
+
+  it('throws on negative SQS_MAX_CONCURRENCY', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_MAX_CONCURRENCY = '-1';
+
+    expect(() => loadConfig()).toThrow('SQS_MAX_CONCURRENCY must be a positive integer');
+  });
+
+  it('throws on non-numeric SQS_MAX_CONCURRENCY', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.SQS_MAX_CONCURRENCY = 'abc';
+
+    expect(() => loadConfig()).toThrow('SQS_MAX_CONCURRENCY must be a positive integer');
+  });
 });
