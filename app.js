@@ -240,6 +240,8 @@ app.use((error, req, res, next) => {
   res.status(500).send('Internal server error.');
 });
 
+let shuttingDown = false;
+
 async function startServer() {
   validateRuntimeConfiguration();
   sqs = new SQSClient(getConfig().sqsConfig);
@@ -250,6 +252,33 @@ async function startServer() {
       resolve(server);
     });
   });
+}
+
+function gracefulShutdown() {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  console.log('Graceful shutdown initiated');
+  stopRefreshLoop();
+
+  const timeout = getConfig() ? getConfig().gracefulShutdownTimeoutMs : 10000;
+  const forceTimer = setTimeout(() => {
+    console.error(`Graceful shutdown timed out after ${timeout}ms, forcing exit`);
+    process.exit(1);
+  }, timeout);
+
+  stopServer()
+    .then(() => {
+      clearTimeout(forceTimer);
+      console.log('Server closed successfully');
+      process.exit(0);
+    })
+    .catch((error) => {
+      clearTimeout(forceTimer);
+      console.error(`Error during shutdown: ${error.message}`);
+      process.exit(1);
+    });
 }
 
 function stopServer() {
@@ -271,6 +300,7 @@ function stopServer() {
       config = null;
       ready = false;
       consecutiveFailures = 0;
+      shuttingDown = false;
       Object.keys(queueState).forEach((k) => delete queueState[k]);
       resolve();
     });
@@ -290,10 +320,14 @@ module.exports = {
   isReady,
   stopRefreshLoop,
   getBackoffDelay,
-  getConfig
+  getConfig,
+  gracefulShutdown
 };
 
 if (require.main === module) {
+  process.on('SIGTERM', gracefulShutdown);
+  process.on('SIGINT', gracefulShutdown);
+
   startServer()
     .then(async () => {
       await refreshOnce();

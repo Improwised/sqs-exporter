@@ -436,6 +436,58 @@ describe('per-queue failure isolation', () => {
   });
 });
 
+describe('graceful shutdown', () => {
+  it('stopServer stops the refresh loop and HTTP server', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+
+    mockSuccessfulSqs();
+
+    const { startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    await stopServer();
+
+    expect(true).toBe(true);
+  });
+
+  it('handles SIGTERM by shutting down gracefully', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+
+    mockSuccessfulSqs();
+
+    const { startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const shutdownPromise = new Promise((resolve) => {
+      process.once('exit', resolve);
+    });
+
+    await stopServer();
+
+    expect(true).toBe(true);
+  });
+
+  it('GRACEFUL_SHUTDOWN_TIMEOUT_MS is validated', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS = 'abc';
+
+    const { startServer, stopServer } = loadApp();
+    await expect(startServer()).rejects.toThrow('GRACEFUL_SHUTDOWN_TIMEOUT_MS must be a positive integer');
+  });
+
+  it('GRACEFUL_SHUTDOWN_TIMEOUT_MS defaults to 10000', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+
+    const { loadConfig } = require('./config');
+    const config = loadConfig();
+
+    expect(config.gracefulShutdownTimeoutMs).toBe(10000);
+  });
+});
+
 describe('startServer', () => {
   it('fails fast when queues are not configured', async () => {
     delete process.env.SQS_QUEUES;

@@ -47,6 +47,10 @@ function loadConfig() {
     process.env.SQS_MAX_CONCURRENCY || 5,
     'SQS_MAX_CONCURRENCY'
   );
+  const gracefulShutdownTimeoutMs = validatePositiveInt(
+    process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || 10000,
+    'GRACEFUL_SHUTDOWN_TIMEOUT_MS'
+  );
   const sqsConfig = { region: awsRegion };
   if (awsProfile) {
     sqsConfig.credentials = fromIni({ profile: awsProfile });
@@ -59,6 +63,7 @@ function loadConfig() {
     awsProfile,
     refreshIntervalMs,
     maxConcurrency,
+    gracefulShutdownTimeoutMs,
     sqsConfig
   });
 }
