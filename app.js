@@ -1,6 +1,5 @@
 const express = require('express');
 const { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand } = require('@aws-sdk/client-sqs');
-const { CloudWatchClient } = require('@aws-sdk/client-cloudwatch');
 const { fromIni } = require('@aws-sdk/credential-provider-ini');
 const client = require('prom-client');
 
@@ -52,7 +51,6 @@ if (awsProfile) {
 }
 
 const sqs = new SQSClient(sqsConfig);
-const cloudwatch = new CloudWatchClient(sqsConfig);
 
 const register = new client.Registry();
 client.collectDefaultMetrics({ register });

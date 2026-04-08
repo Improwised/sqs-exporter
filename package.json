@@ -14,7 +14,6 @@
   "license": "ISC",
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.1025.0",
-    "@aws-sdk/client-cloudwatch": "^3.1025.0",
     "@aws-sdk/credential-provider-ini": "^3.972.28",
     "@aws-sdk/credential-provider-node": "^3.972.29",
     "@aws-sdk/shared-ini-file-loader": "^3.40.0",
@@ -22,7 +21,6 @@
     "prom-client": "^15.1.0"
   },
   "devDependencies": {
-    "aws-sdk-mock": "^5.1.0",
     "jest": "^28.1.0",
     "supertest": "^6.1.3"
   }
