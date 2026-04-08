@@ -36,12 +36,6 @@ function stopServer() {
   }
 }
 
-module.exports = {
-  app,
-  startServer,
-  stopServer
-};
-
 // Set up AWS SDK
 const awsProfile = process.env.AWS_PROFILE || 'default';
 const awsCredentials = fromIni({ profile: awsProfile });
@@ -92,6 +86,9 @@ async function getSQSAttributes(queueName) {
 }
 
 module.exports = {
+  app,
+  startServer,
+  stopServer,
   getQueueUrl,
   getSQSAttributes
 };
