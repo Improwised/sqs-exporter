@@ -30,6 +30,24 @@ jest.mock('@aws-sdk/client-sqs', () => {
   return { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand, ListQueuesCommand };
 });
 
+const mockCloudWatchSend = jest.fn();
+
+jest.mock('@aws-sdk/client-cloudwatch', () => {
+  class CloudWatchClient {
+    constructor() {
+      this.send = mockCloudWatchSend;
+    }
+  }
+
+  class GetMetricStatisticsCommand {
+    constructor(input) {
+      this.input = input;
+    }
+  }
+
+  return { CloudWatchClient, GetMetricStatisticsCommand };
+});
+
 const originalEnv = process.env;
 
 let testPort = 3100;
@@ -68,6 +86,12 @@ beforeEach(() => {
   delete process.env.METRICS_REFRESH_INTERVAL_MS;
   delete process.env.SQS_DISCOVERY_TTL_MS;
   delete process.env.SQS_MAX_DISCOVERED_QUEUES;
+  delete process.env.CW_METRICS_ENABLED;
+  delete process.env.CW_METRICS_REFRESH_INTERVAL_MS;
+  delete process.env.CW_METRICS_NAMESPACE;
+  delete process.env.CW_METRICS_METRIC_NAME;
+  delete process.env.CW_METRICS_PERIOD_SECONDS;
+  delete process.env.CW_METRICS_STATISTIC;
 });
 
 afterAll(() => {
@@ -935,6 +959,141 @@ describe('FIFO in-flight groups metric', () => {
     const response = await request(app).get('/metrics');
     expect(response.statusCode).toBe(200);
     expect(response.text).not.toContain('sqs_approximate_number_of_groups_with_inflight_messages{queueName="standard-queue"}');
+
+    await stopServer();
+  });
+});
+
+describe('CloudWatch deletions metric', () => {
+  it('exposes sqs_messages_deleted_last_5m when CW_METRICS_ENABLED=true', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.CW_METRICS_ENABLED = 'true';
+
+    mockSuccessfulSqs();
+    mockCloudWatchSend.mockImplementation(async () => ({
+      Datapoints: [{ Timestamp: new Date(), Sum: 42 }]
+    }));
+
+    const { app, startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    const response = await request(app).get('/metrics');
+    expect(response.statusCode).toBe(200);
+    expect(response.text).toContain('sqs_messages_deleted_last_5m{queueName="queue-a"} 42');
+
+    await stopServer();
+  });
+
+  it('queries CloudWatch with the expected parameters', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.CW_METRICS_ENABLED = 'true';
+
+    mockSuccessfulSqs();
+    mockCloudWatchSend.mockImplementation(async () => ({
+      Datapoints: [{ Timestamp: new Date(), Sum: 7 }]
+    }));
+
+    const { startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    const command = mockCloudWatchSend.mock.calls[0][0];
+    expect(command.input.Namespace).toBe('AWS/SQS');
+    expect(command.input.MetricName).toBe('NumberOfMessagesDeleted');
+    expect(command.input.Dimensions).toEqual([{ Name: 'QueueName', Value: 'queue-a' }]);
+    expect(command.input.Period).toBe(300);
+    expect(command.input.Statistics).toEqual(['Sum']);
+
+    await stopServer();
+  });
+
+  it('uses CloudWatch parameters from environment variables', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.CW_METRICS_ENABLED = 'true';
+    process.env.CW_METRICS_NAMESPACE = 'Custom/Namespace';
+    process.env.CW_METRICS_METRIC_NAME = 'CustomMetric';
+    process.env.CW_METRICS_PERIOD_SECONDS = '60';
+    process.env.CW_METRICS_STATISTIC = 'Average';
+
+    mockSuccessfulSqs();
+    mockCloudWatchSend.mockImplementation(async () => ({
+      Datapoints: [{ Timestamp: new Date(), Average: 3.5 }]
+    }));
+
+    const { startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    const command = mockCloudWatchSend.mock.calls[0][0];
+    expect(command.input.Namespace).toBe('Custom/Namespace');
+    expect(command.input.MetricName).toBe('CustomMetric');
+    expect(command.input.Period).toBe(60);
+    expect(command.input.Statistics).toEqual(['Average']);
+
+    await stopServer();
+  });
+
+  it('gracefully skips CloudWatch when IAM permissions are missing', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.CW_METRICS_ENABLED = 'true';
+
+    mockSuccessfulSqs();
+    mockCloudWatchSend.mockRejectedValue(new Error('AccessDenied: not authorized'));
+
+    const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { app, startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    const response = await request(app).get('/metrics');
+    expect(response.statusCode).toBe(200);
+
+    consoleSpy.mockRestore();
+    await stopServer();
+  });
+
+  it('does not call CloudWatch when CW_METRICS_ENABLED is false (default)', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+
+    mockSuccessfulSqs();
+
+    const { app, startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    const response = await request(app).get('/metrics');
+    expect(mockCloudWatchSend).not.toHaveBeenCalled();
+    expect(response.text).not.toContain('sqs_messages_deleted_last_5m{queueName="queue-a"}');
+
+    await stopServer();
+  });
+
+  it('takes the most recent datapoint when multiple are returned', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.CW_METRICS_ENABLED = 'true';
+
+    mockSuccessfulSqs();
+    mockCloudWatchSend.mockImplementation(async () => ({
+      Datapoints: [
+        { Timestamp: new Date('2026-10-25T00:00:00Z'), Sum: 100 },
+        { Timestamp: new Date('2026-10-25T00:05:00Z'), Sum: 200 }
+      ]
+    }));
+
+    const { app, startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_messages_deleted_last_5m{queueName="queue-a"} 200');
 
     await stopServer();
   });

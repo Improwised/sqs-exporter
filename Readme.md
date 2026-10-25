@@ -7,6 +7,7 @@ It polls queue attributes from AWS SQS and publishes these metrics:
 - `sqs_approximate_number_of_messages`
 - `sqs_approximate_number_of_messages_not_visible`
 - `sqs_approximate_number_of_messages_delayed`
+- `sqs_messages_deleted_last_5m` (only when `CW_METRICS_ENABLED=true`)
 
 ## Requirements
 
@@ -14,6 +15,8 @@ It polls queue attributes from AWS SQS and publishes these metrics:
 - Access to AWS SQS with permission to call:
   - `sqs:GetQueueUrl`
   - `sqs:GetQueueAttributes`
+- (optional) Access to AWS CloudWatch with permission to call:
+  - `cloudwatch:GetMetricStatistics` (only when `CW_METRICS_ENABLED=true`)
 
 ## Installation
 
@@ -30,6 +33,15 @@ Set these environment variables before starting the service:
 - `AWS_PROFILE` (optional): local AWS profile name from `~/.aws/credentials`
 - `PORT` (optional): HTTP port, defaults to `3001`
 - `METRICS_REFRESH_INTERVAL_MS` (optional): background refresh interval in milliseconds, defaults to `15000`
+
+**CloudWatch deletions metric** (all optional — the feature is disabled unless `CW_METRICS_ENABLED=true`):
+
+- `CW_METRICS_ENABLED`: set to `true` to enable the `sqs_messages_deleted_last_5m` metric, defaults to `false`
+- `CW_METRICS_REFRESH_INTERVAL_MS`: CloudWatch refresh interval in milliseconds, defaults to `300000` (5 minutes)
+- `CW_METRICS_NAMESPACE`: CloudWatch metric namespace, defaults to `AWS/SQS`
+- `CW_METRICS_METRIC_NAME`: CloudWatch metric name, defaults to `NumberOfMessagesDeleted`
+- `CW_METRICS_PERIOD_SECONDS`: aggregation period in seconds, defaults to `300` (must be a positive integer and a multiple of 60 per CloudWatch)
+- `CW_METRICS_STATISTIC`: CloudWatch statistic, defaults to `Sum`
 
 ### Authentication
 
@@ -49,6 +61,8 @@ Server startup will fail fast with a clear error when:
 - `AWS_REGION` is invalid
 - `PORT` is not a positive integer
 - `METRICS_REFRESH_INTERVAL_MS` is not a positive integer
+- `CW_METRICS_REFRESH_INTERVAL_MS` is not a positive integer
+- `CW_METRICS_PERIOD_SECONDS` is not a positive integer
 - `AWS_PROFILE` is set but cannot be loaded
 
 ## Docker
@@ -78,7 +92,7 @@ The container runs as a non-root user. A healthcheck against `/ping` is configur
 
 ## Metric Cardinality
 
-Each monitored queue contributes approximately **4 time series** (3 SQS gauges + default Node.js metrics). Plan Prometheus capacity accordingly:
+Each monitored queue contributes approximately **4 time series** (3 SQS gauges + default Node.js metrics), plus **1 additional time series per queue** (`sqs_messages_deleted_last_5m`) when CloudWatch metrics are enabled. Plan Prometheus capacity accordingly:
 
 | Queues | Approximate Time Series |
 |--------|------------------------|
