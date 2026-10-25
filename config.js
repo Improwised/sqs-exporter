@@ -95,6 +95,23 @@ function loadConfig() {
     process.env.SQS_MAX_DISCOVERED_QUEUES || 100,
     'SQS_MAX_DISCOVERED_QUEUES'
   );
+  const cwMetricsEnabled = process.env.CW_METRICS_ENABLED === 'true';
+  const cwMetricsRefreshIntervalMs = validatePositiveInt(
+    process.env.CW_METRICS_REFRESH_INTERVAL_MS || 300000,
+    'CW_METRICS_REFRESH_INTERVAL_MS'
+  );
+  const cwMetricsNamespace = process.env.CW_METRICS_NAMESPACE || 'AWS/SQS';
+  const cwMetricsMetricName = process.env.CW_METRICS_METRIC_NAME || 'NumberOfMessagesDeleted';
+  const cwMetricsPeriodSeconds = validatePositiveInt(
+    process.env.CW_METRICS_PERIOD_SECONDS || 300,
+    'CW_METRICS_PERIOD_SECONDS'
+  );
+  const cwMetricsStatistic = process.env.CW_METRICS_STATISTIC || 'Sum';
+
+  // Resolve credentials once and share them across AWS clients so that
+  // the SQS client and the CloudWatch client authenticate identically.
+  const awsCredentials = awsProfile ? fromIni({ profile: awsProfile }) : undefined;
+
   const sqsConfig = { region: awsRegion };
   if (process.env.SQS_MAX_ATTEMPTS) {
     sqsConfig.maxAttempts = validatePositiveInt(process.env.SQS_MAX_ATTEMPTS, 'SQS_MAX_ATTEMPTS');
@@ -102,8 +119,13 @@ function loadConfig() {
   if (process.env.SQS_REQUEST_TIMEOUT_MS) {
     sqsConfig.requestTimeout = validatePositiveInt(process.env.SQS_REQUEST_TIMEOUT_MS, 'SQS_REQUEST_TIMEOUT_MS');
   }
-  if (awsProfile) {
-    sqsConfig.credentials = fromIni({ profile: awsProfile });
+  if (awsCredentials) {
+    sqsConfig.credentials = awsCredentials;
+  }
+
+  const cloudWatchConfig = { region: awsRegion };
+  if (awsCredentials) {
+    cloudWatchConfig.credentials = awsCredentials;
   }
 
   return Object.freeze({
@@ -117,7 +139,14 @@ function loadConfig() {
     gracefulShutdownTimeoutMs,
     discoveryTtlMs,
     maxDiscoveredQueues,
-    sqsConfig
+    cwMetricsEnabled,
+    cwMetricsRefreshIntervalMs,
+    cwMetricsNamespace,
+    cwMetricsMetricName,
+    cwMetricsPeriodSeconds,
+    cwMetricsStatistic,
+    sqsConfig,
+    cloudWatchConfig
   });
 }
 

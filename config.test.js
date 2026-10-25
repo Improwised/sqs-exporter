@@ -272,6 +272,107 @@ describe('loadConfig', () => {
     expect(config.sqsConfig.maxAttempts).toBeUndefined();
     expect(config.sqsConfig.requestTimeout).toBeUndefined();
   });
+
+  it('defaults CW_METRICS_ENABLED to false', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    delete process.env.CW_METRICS_ENABLED;
+
+    const config = loadConfig();
+
+    expect(config.cwMetricsEnabled).toBe(false);
+  });
+
+  it('enables CloudWatch metrics when CW_METRICS_ENABLED=true', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.CW_METRICS_ENABLED = 'true';
+
+    const config = loadConfig();
+
+    expect(config.cwMetricsEnabled).toBe(true);
+  });
+
+  it('defaults CW_METRICS_REFRESH_INTERVAL_MS to 300000', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    delete process.env.CW_METRICS_REFRESH_INTERVAL_MS;
+
+    const config = loadConfig();
+
+    expect(config.cwMetricsRefreshIntervalMs).toBe(300000);
+  });
+
+  it('throws on zero CW_METRICS_REFRESH_INTERVAL_MS', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.CW_METRICS_REFRESH_INTERVAL_MS = '0';
+
+    expect(() => loadConfig()).toThrow('CW_METRICS_REFRESH_INTERVAL_MS must be a positive integer');
+  });
+
+  it('defaults CloudWatch namespace, metric name, period and statistic', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    delete process.env.CW_METRICS_NAMESPACE;
+    delete process.env.CW_METRICS_METRIC_NAME;
+    delete process.env.CW_METRICS_PERIOD_SECONDS;
+    delete process.env.CW_METRICS_STATISTIC;
+
+    const config = loadConfig();
+
+    expect(config.cwMetricsNamespace).toBe('AWS/SQS');
+    expect(config.cwMetricsMetricName).toBe('NumberOfMessagesDeleted');
+    expect(config.cwMetricsPeriodSeconds).toBe(300);
+    expect(config.cwMetricsStatistic).toBe('Sum');
+  });
+
+  it('reads CloudWatch parameters from environment', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.CW_METRICS_NAMESPACE = 'Custom/Namespace';
+    process.env.CW_METRICS_METRIC_NAME = 'CustomMetric';
+    process.env.CW_METRICS_PERIOD_SECONDS = '60';
+    process.env.CW_METRICS_STATISTIC = 'Average';
+
+    const config = loadConfig();
+
+    expect(config.cwMetricsNamespace).toBe('Custom/Namespace');
+    expect(config.cwMetricsMetricName).toBe('CustomMetric');
+    expect(config.cwMetricsPeriodSeconds).toBe(60);
+    expect(config.cwMetricsStatistic).toBe('Average');
+  });
+
+  it('throws on zero CW_METRICS_PERIOD_SECONDS', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.CW_METRICS_PERIOD_SECONDS = '0';
+
+    expect(() => loadConfig()).toThrow('CW_METRICS_PERIOD_SECONDS must be a positive integer');
+  });
+
+  it('shares fromIni credentials between sqsConfig and cloudWatchConfig', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    process.env.AWS_PROFILE = 'my-profile';
+
+    const config = loadConfig();
+
+    expect(config.cloudWatchConfig.region).toBe('us-west-2');
+    expect(config.cloudWatchConfig.credentials).toBeDefined();
+    expect(config.sqsConfig.credentials).toBeDefined();
+  });
+
+  it('leaves cloudWatchConfig credentials undefined without AWS_PROFILE', () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.AWS_REGION = 'us-west-2';
+    delete process.env.AWS_PROFILE;
+
+    const config = loadConfig();
+
+    expect(config.cloudWatchConfig.region).toBe('us-west-2');
+    expect(config.cloudWatchConfig.credentials).toBeUndefined();
+  });
 });
 
 describe('config validation failure paths', () => {

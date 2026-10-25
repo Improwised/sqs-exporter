@@ -1,5 +1,6 @@
 const express = require('express');
 const { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand, ListQueuesCommand } = require('@aws-sdk/client-sqs');
+const { CloudWatchClient, GetMetricStatisticsCommand } = require('@aws-sdk/client-cloudwatch');
 const client = require('prom-client');
 const { loadConfig } = require('./config');
 
@@ -90,7 +91,16 @@ const sqsExporterQueueRefreshTotal = new client.Counter({
 });
 register.registerMetric(sqsExporterQueueRefreshTotal);
 
+const sqsMessagesDeletedLast5m = new client.Gauge({
+  name: 'sqs_messages_deleted_last_5m',
+  help: 'Number of messages deleted over the most recent CloudWatch period (default 5 minutes)',
+  labelNames: ['queueName']
+});
+register.registerMetric(sqsMessagesDeletedLast5m);
+
 let sqs = null;
+let cloudwatch = null;
+let cwRefreshTimer = null;
 
 async function getQueueUrl(queueName) {
   if (queueUrlCache[queueName]) {
@@ -272,6 +282,15 @@ async function discoverQueues() {
   return discoveredQueueUrls;
 }
 
+function getMonitoredQueueNames() {
+  const cfg = getConfig();
+  if (!cfg) return [];
+  const exactNames = (cfg.queueNames || []).filter((n) => !n.endsWith('*'));
+  const queueUrlNames = (cfg.queueUrls || []).map((u) => u.name);
+  const discoveredNames = discoveredQueueUrls.map((d) => d.name);
+  return [...new Set([...exactNames, ...queueUrlNames, ...discoveredNames])];
+}
+
 async function refreshOnce() {
   if (refreshing) {
     return;
@@ -367,6 +386,48 @@ async function refreshOnce() {
   }
 }
 
+async function refreshCloudWatchMetrics() {
+  const cfg = getConfig();
+  if (!cfg || !cfg.cwMetricsEnabled) return;
+  if (!cloudwatch) return;
+
+  try {
+    const queueNames = getMonitoredQueueNames();
+    if (queueNames.length === 0) return;
+
+    const endTime = new Date();
+    // Query two periods back to absorb CloudWatch's ~1-2 minute metric delay.
+    const lookbackMs = cfg.cwMetricsPeriodSeconds * 2 * 1000;
+    const startTime = new Date(endTime.getTime() - lookbackMs);
+
+    for (const queueName of queueNames) {
+      try {
+        const command = new GetMetricStatisticsCommand({
+          Namespace: cfg.cwMetricsNamespace,
+          MetricName: cfg.cwMetricsMetricName,
+          Dimensions: [{ Name: 'QueueName', Value: queueName }],
+          StartTime: startTime,
+          EndTime: endTime,
+          Period: cfg.cwMetricsPeriodSeconds,
+          Statistics: [cfg.cwMetricsStatistic]
+        });
+        const data = await cloudwatch.send(command);
+        const datapoints = (data.Datapoints || [])
+          .sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
+        const statisticValue = cfg.cwMetricsStatistic;
+        const latestValue = datapoints.length > 0 ? (datapoints[0][statisticValue] || 0) : 0;
+        sqsMessagesDeletedLast5m.set({ queueName }, latestValue);
+      } catch (error) {
+        // Gracefully skip queues where CloudWatch calls fail
+        // (e.g., missing IAM permissions for cloudwatch:GetMetricStatistics)
+        console.warn(`CloudWatch metric for queue "${queueName}" skipped: ${error.message}`);
+      }
+    }
+  } catch (error) {
+    console.warn(`CloudWatch refresh cycle failed: ${error.message}`);
+  }
+}
+
 function getBackoffDelay() {
   const multiplier = Math.min(Math.pow(2, consecutiveFailures), MAX_BACKOFF_MULTIPLIER);
   return getConfig().refreshIntervalMs * multiplier;
@@ -390,6 +451,30 @@ function stopRefreshLoop() {
   if (refreshTimer) {
     clearTimeout(refreshTimer);
     refreshTimer = null;
+  }
+}
+
+function scheduleCloudWatchRefresh() {
+  if (cwRefreshTimer) {
+    clearTimeout(cwRefreshTimer);
+  }
+
+  const cfg = getConfig();
+  if (!cfg || !cfg.cwMetricsEnabled) return;
+
+  const interval = cfg.cwMetricsRefreshIntervalMs;
+  cwRefreshTimer = setTimeout(async () => {
+    try {
+      await refreshCloudWatchMetrics();
+    } catch (_) {}
+    scheduleCloudWatchRefresh();
+  }, interval);
+}
+
+function stopCloudWatchRefresh() {
+  if (cwRefreshTimer) {
+    clearTimeout(cwRefreshTimer);
+    cwRefreshTimer = null;
   }
 }
 
@@ -427,6 +512,7 @@ app.use((error, req, res, next) => {
 async function startServer() {
   validateRuntimeConfiguration();
   sqs = new SQSClient(getConfig().sqsConfig);
+  cloudwatch = new CloudWatchClient(getConfig().cloudWatchConfig);
 
   return new Promise((resolve) => {
     server = app.listen(getConfig().port, () => {
@@ -443,6 +529,7 @@ function gracefulShutdown() {
   shuttingDown = true;
   console.log('Graceful shutdown initiated');
   stopRefreshLoop();
+  stopCloudWatchRefresh();
 
   const timeout = getConfig() ? getConfig().gracefulShutdownTimeoutMs : 10000;
   const forceTimer = setTimeout(() => {
@@ -465,6 +552,7 @@ function gracefulShutdown() {
 
 function stopServer() {
   stopRefreshLoop();
+  stopCloudWatchRefresh();
 
   if (!server) {
     return Promise.resolve();
@@ -479,6 +567,7 @@ function stopServer() {
 
       server = undefined;
       sqs = null;
+      cloudwatch = null;
       config = null;
       ready = false;
       consecutiveFailures = 0;
@@ -504,6 +593,10 @@ module.exports = {
   scheduleRefresh,
   isReady,
   stopRefreshLoop,
+  refreshCloudWatchMetrics,
+  scheduleCloudWatchRefresh,
+  stopCloudWatchRefresh,
+  getMonitoredQueueNames,
   getBackoffDelay,
   getConfig,
   gracefulShutdown
@@ -522,6 +615,9 @@ if (require.main === module) {
       }
       console.log('Initial refresh completed successfully');
       scheduleRefresh();
+      if (getConfig().cwMetricsEnabled) {
+        scheduleCloudWatchRefresh();
+      }
     })
     .catch((error) => {
       console.error(`Failed to start server: ${error.message}`);
