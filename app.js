@@ -1,7 +1,7 @@
 const express = require('express');
 const { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand, ListQueuesCommand } = require('@aws-sdk/client-sqs');
 const { CloudWatchClient, GetMetricDataCommand } = require('@aws-sdk/client-cloudwatch');
-const client = require('prom-client');
+const client = require('@prometheus-io/client');
 const { loadConfig } = require('./config');
 
 let server;
