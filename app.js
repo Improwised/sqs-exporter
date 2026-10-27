@@ -1,6 +1,6 @@
 const express = require('express');
 const { SQSClient, GetQueueUrlCommand, GetQueueAttributesCommand, ListQueuesCommand } = require('@aws-sdk/client-sqs');
-const { CloudWatchClient, GetMetricStatisticsCommand } = require('@aws-sdk/client-cloudwatch');
+const { CloudWatchClient, GetMetricDataCommand } = require('@aws-sdk/client-cloudwatch');
 const client = require('prom-client');
 const { loadConfig } = require('./config');
 
@@ -10,12 +10,24 @@ let refreshing = false;
 let ready = false;
 let consecutiveFailures = 0;
 let shuttingDown = false;
-let lastRefreshStart = 0;
 const MAX_BACKOFF_MULTIPLIER = 32;
+// Per-queue health: { state: 'UP' | 'DOWN', failures, retryAt }
 const queueState = {};
 const queueUrlCache = {};
+// Latest SQS attributes per queue, used to decide which queues need CloudWatch data.
+const queueSnapshot = {};
+let monitoredQueueNames = new Set();
 let discoveredQueueUrls = [];
 let discoveryTimestamp = 0;
+
+// CloudWatch deletions metric: 1-minute buckets summed over a fixed 5-minute window.
+const CW_NAMESPACE = 'AWS/SQS';
+const CW_METRIC_NAME = 'NumberOfMessagesDeleted';
+const CW_PERIOD_SECONDS = 60;
+const CW_WINDOW_SECONDS = 300;
+const CW_MAX_QUERIES_PER_REQUEST = 500;
+
+const QUEUE_MISSING_ERRORS = ['QueueDoesNotExist', 'AWS.SimpleQueueService.NonExistentQueue'];
 
 const app = express();
 
@@ -93,14 +105,55 @@ register.registerMetric(sqsExporterQueueRefreshTotal);
 
 const sqsMessagesDeletedLast5m = new client.Gauge({
   name: 'sqs_messages_deleted_last_5m',
-  help: 'Number of messages deleted over the most recent CloudWatch period (default 5 minutes)',
+  help: 'Messages deleted over the last 5 complete minutes (CloudWatch NumberOfMessagesDeleted). Only exported for queues with messages waiting or in flight',
   labelNames: ['queueName']
 });
 register.registerMetric(sqsMessagesDeletedLast5m);
 
+const sqsExporterAwsRequestsTotal = new client.Counter({
+  name: 'sqs_exporter_aws_requests_total',
+  help: 'AWS API requests issued by the exporter (excluding SDK retries), by API and result',
+  labelNames: ['api', 'result']
+});
+register.registerMetric(sqsExporterAwsRequestsTotal);
+
+const sqsExporterCloudWatchMetricsRequestedTotal = new client.Counter({
+  name: 'sqs_exporter_cloudwatch_metrics_requested_total',
+  help: 'CloudWatch metrics requested via GetMetricData (the unit CloudWatch bills on)'
+});
+register.registerMetric(sqsExporterCloudWatchMetricsRequestedTotal);
+
+const perQueueGauges = [
+  sqsApproximateNumberOfMessagesVisible,
+  sqsApproximateNumberOfMessagesNotVisible,
+  sqsApproximateNumberOfMessagesDelayed,
+  sqsApproximateNumberOfGroupsWithInflightMessages,
+  sqsMessagesDeletedLast5m
+];
+
 let sqs = null;
 let cloudwatch = null;
 let cwRefreshTimer = null;
+let cwRefreshing = false;
+
+async function sendTracked(awsClient, command, api) {
+  try {
+    const data = await awsClient.send(command);
+    sqsExporterAwsRequestsTotal.inc({ api, result: 'success' });
+    return data;
+  } catch (error) {
+    sqsExporterAwsRequestsTotal.inc({ api, result: 'error' });
+    throw error;
+  }
+}
+
+function isQueueMissingError(error) {
+  return QUEUE_MISSING_ERRORS.includes(error.name) || QUEUE_MISSING_ERRORS.includes(error.Code);
+}
+
+function clearQueueMetrics(queueName) {
+  perQueueGauges.forEach((gauge) => gauge.remove({ queueName }));
+}
 
 async function getQueueUrl(queueName) {
   if (queueUrlCache[queueName]) {
@@ -109,7 +162,7 @@ async function getQueueUrl(queueName) {
 
   try {
     const command = new GetQueueUrlCommand({ QueueName: queueName });
-    const data = await sqs.send(command);
+    const data = await sendTracked(sqs, command, 'GetQueueUrl');
     queueUrlCache[queueName] = data.QueueUrl;
     return data.QueueUrl;
   } catch (error) {
@@ -118,9 +171,11 @@ async function getQueueUrl(queueName) {
   }
 }
 
-async function getSQSAttributes(queueName) {
+async function fetchQueueAttributes(target) {
+  const queueName = target.name;
+  const queueUrl = target.url || await getQueueUrl(queueName);
+
   try {
-    const queueUrl = await getQueueUrl(queueName);
     const command = new GetQueueAttributesCommand({
       QueueUrl: queueUrl,
       AttributeNames: [
@@ -131,16 +186,12 @@ async function getSQSAttributes(queueName) {
       ]
     });
 
-    const data = await sqs.send(command);
+    const data = await sendTracked(sqs, command, 'GetQueueAttributes');
+    const visible = parseInt(data.Attributes.ApproximateNumberOfMessages, 10) || 0;
+    const notVisible = parseInt(data.Attributes.ApproximateNumberOfMessagesNotVisible, 10) || 0;
 
-    sqsApproximateNumberOfMessagesVisible.set(
-      { queueName },
-      parseInt(data.Attributes.ApproximateNumberOfMessages, 10) || 0
-    );
-    sqsApproximateNumberOfMessagesNotVisible.set(
-      { queueName },
-      parseInt(data.Attributes.ApproximateNumberOfMessagesNotVisible, 10) || 0
-    );
+    sqsApproximateNumberOfMessagesVisible.set({ queueName }, visible);
+    sqsApproximateNumberOfMessagesNotVisible.set({ queueName }, notVisible);
     sqsApproximateNumberOfMessagesDelayed.set(
       { queueName },
       parseInt(data.Attributes.ApproximateNumberOfMessagesDelayed, 10) || 0
@@ -152,58 +203,24 @@ async function getSQSAttributes(queueName) {
         parseInt(data.Attributes.ApproximateNumberOfGroupsWithInflightMessages, 10) || 0
       );
     } else {
-      sqsApproximateNumberOfGroupsWithInflightMessages.reset({ queueName });
+      sqsApproximateNumberOfGroupsWithInflightMessages.remove({ queueName });
     }
 
+    queueSnapshot[queueName] = { url: queueUrl, visible, notVisible };
     return data.Attributes;
   } catch (error) {
-    delete queueUrlCache[queueName];
-    console.error(`Failed to read queue attributes for "${queueName}":`, error.message);
+    // Only a missing queue invalidates the cached URL; throttling or timeouts
+    // would otherwise cost an extra GetQueueUrl call on every failed cycle.
+    if (!target.url && isQueueMissingError(error)) {
+      delete queueUrlCache[queueName];
+    }
+    console.error(`Failed to read queue attributes for "${queueName}" (URL: ${queueUrl}):`, error.message);
     throw error;
   }
 }
 
-async function getSQSAttributesByUrl(queueName, queueUrl) {
-  try {
-    const command = new GetQueueAttributesCommand({
-      QueueUrl: queueUrl,
-      AttributeNames: [
-        'ApproximateNumberOfMessages',
-        'ApproximateNumberOfMessagesNotVisible',
-        'ApproximateNumberOfMessagesDelayed',
-        'ApproximateNumberOfGroupsWithInflightMessages'
-      ]
-    });
-
-    const data = await sqs.send(command);
-
-    sqsApproximateNumberOfMessagesVisible.set(
-      { queueName },
-      parseInt(data.Attributes.ApproximateNumberOfMessages, 10) || 0
-    );
-    sqsApproximateNumberOfMessagesNotVisible.set(
-      { queueName },
-      parseInt(data.Attributes.ApproximateNumberOfMessagesNotVisible, 10) || 0
-    );
-    sqsApproximateNumberOfMessagesDelayed.set(
-      { queueName },
-      parseInt(data.Attributes.ApproximateNumberOfMessagesDelayed, 10) || 0
-    );
-
-    if (data.Attributes.ApproximateNumberOfGroupsWithInflightMessages !== undefined) {
-      sqsApproximateNumberOfGroupsWithInflightMessages.set(
-        { queueName },
-        parseInt(data.Attributes.ApproximateNumberOfGroupsWithInflightMessages, 10) || 0
-      );
-    } else {
-      sqsApproximateNumberOfGroupsWithInflightMessages.reset({ queueName });
-    }
-
-    return data.Attributes;
-  } catch (error) {
-    console.error(`Failed to read queue attributes for "${queueName}" (URL: ${queueUrl}):`, error.message);
-    throw error;
-  }
+async function getSQSAttributes(queueName) {
+  return fetchQueueAttributes({ name: queueName, url: null });
 }
 
 async function boundedMap(items, fn, concurrency) {
@@ -230,6 +247,15 @@ function parseQueueNameFromUrl(url) {
   return parts[parts.length - 1];
 }
 
+function parseRegionFromQueueUrl(url) {
+  try {
+    const match = new URL(url).hostname.match(/(?:^|\.)([a-z]{2}(?:-[a-z]+)+-\d+)\./);
+    return match ? match[1] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function discoverQueues() {
   const cfg = getConfig();
   const now = Date.now();
@@ -247,19 +273,27 @@ async function discoverQueues() {
   }
 
   const allDiscovered = [];
+  let anyPrefixFailed = false;
   for (const prefix of prefixes) {
     const prefixStr = prefix.slice(0, -1);
     try {
       const command = new ListQueuesCommand({ QueueNamePrefix: prefixStr });
-      const data = await sqs.send(command);
+      const data = await sendTracked(sqs, command, 'ListQueues');
       const urls = data.QueueUrls || [];
       if (urls.length === 0) {
         console.error(`Prefix "${prefix}" returned no matches`);
       }
       allDiscovered.push(...urls);
     } catch (error) {
+      anyPrefixFailed = true;
       console.error(`Failed to discover queues for prefix "${prefix}": ${error.message}`);
     }
+  }
+
+  // Keep the previous result on a failed lookup (retried next cycle) rather than
+  // treating its queues as removed and dropping their series.
+  if (anyPrefixFailed && discoveredQueueUrls.length > 0) {
+    return discoveredQueueUrls;
   }
 
   if (allDiscovered.length > cfg.maxDiscoveredQueues) {
@@ -283,12 +317,61 @@ async function discoverQueues() {
 }
 
 function getMonitoredQueueNames() {
-  const cfg = getConfig();
-  if (!cfg) return [];
-  const exactNames = (cfg.queueNames || []).filter((n) => !n.endsWith('*'));
-  const queueUrlNames = (cfg.queueUrls || []).map((u) => u.name);
-  const discoveredNames = discoveredQueueUrls.map((d) => d.name);
-  return [...new Set([...exactNames, ...queueUrlNames, ...discoveredNames])];
+  return [...monitoredQueueNames];
+}
+
+// Drop every series and cached state for queues that are no longer monitored
+// (e.g. a discovered queue was deleted), so they don't linger forever.
+function forgetRemovedQueues(currentNames) {
+  monitoredQueueNames.forEach((queueName) => {
+    if (currentNames.has(queueName)) {
+      return;
+    }
+    clearQueueMetrics(queueName);
+    sqsExporterQueueUp.remove({ queueName });
+    delete queueState[queueName];
+    delete queueSnapshot[queueName];
+    delete queueUrlCache[queueName];
+  });
+  monitoredQueueNames = currentNames;
+}
+
+function isQueueDue(queueName, now) {
+  const state = queueState[queueName];
+  return !state || !state.retryAt || state.retryAt <= now;
+}
+
+function markQueueUp(queueName) {
+  const state = queueState[queueName];
+  if (state && state.state === 'DOWN') {
+    console.error(`Queue "${queueName}" transitioned DOWN -> UP`);
+  }
+  queueState[queueName] = { state: 'UP', failures: 0, retryAt: 0 };
+  sqsExporterQueueUp.set({ queueName }, 1);
+}
+
+function markQueueDown(queueName, reason, refreshStart) {
+  const previous = queueState[queueName];
+  if (!previous) {
+    console.error(`Queue "${queueName}" is DOWN: ${reason.message}`);
+  } else if (previous.state === 'UP') {
+    console.error(`Queue "${queueName}" transitioned UP -> DOWN: ${reason.message}`);
+  }
+
+  // Retry on the next cycle after the first failure, then skip exponentially
+  // more cycles so a deleted or forbidden queue stops costing a call per cycle.
+  const failures = (previous && previous.state === 'DOWN' ? previous.failures : 0) + 1;
+  const multiplier = Math.min(Math.pow(2, failures - 1), MAX_BACKOFF_MULTIPLIER) - 1;
+  queueState[queueName] = {
+    state: 'DOWN',
+    failures,
+    retryAt: refreshStart + getConfig().refreshIntervalMs * multiplier
+  };
+
+  // Report "unknown" rather than 0 messages: drop the series and rely on queue_up.
+  clearQueueMetrics(queueName);
+  delete queueSnapshot[queueName];
+  sqsExporterQueueUp.set({ queueName }, 0);
 }
 
 async function refreshOnce() {
@@ -307,67 +390,43 @@ async function refreshOnce() {
     const discovered = await discoverQueues();
 
     const allTargets = [
-      ...exactNames.map((name) => ({ name, url: null, type: 'name' })),
-      ...queueUrls.map((u) => ({ name: u.name, url: u.url, type: 'url' })),
-      ...discovered.map((d) => ({ name: d.name, url: d.url, type: 'url' }))
+      ...exactNames.map((name) => ({ name, url: null })),
+      ...queueUrls.map((u) => ({ name: u.name, url: u.url })),
+      ...discovered.map((d) => ({ name: d.name, url: d.url }))
     ];
 
-    const rawResults = await boundedMap(
-      allTargets,
-      (target) => {
-        const promise = target.type === 'url'
-          ? getSQSAttributesByUrl(target.name, target.url)
-          : getSQSAttributes(target.name);
-        return promise.then(
-          (value) => ({ status: 'fulfilled', value, name: target.name }),
-          (reason) => ({ status: 'rejected', reason, name: target.name })
-        );
-      },
+    forgetRemovedQueues(new Set(allTargets.map((t) => t.name)));
+
+    const dueTargets = allTargets.filter((target) => isQueueDue(target.name, refreshStart));
+
+    const results = await boundedMap(
+      dueTargets,
+      (target) => fetchQueueAttributes(target).then(
+        (value) => ({ status: 'fulfilled', value, name: target.name }),
+        (reason) => ({ status: 'rejected', reason, name: target.name })
+      ),
       maxConcurrency
     );
 
-    const results = rawResults;
-
-    let anySuccess = false;
-    let anyFailure = false;
     let successCount = 0;
     let failureCount = 0;
 
     results.forEach((result) => {
-      const queueName = result.name;
       if (result.status === 'fulfilled') {
-        anySuccess = true;
         successCount++;
-        sqsExporterQueueUp.set({ queueName }, 1);
-        if (queueState[queueName] === 'DOWN') {
-          console.error(`Queue "${queueName}" transitioned DOWN -> UP`);
-          queueState[queueName] = 'UP';
-        } else {
-          queueState[queueName] = 'UP';
-        }
+        markQueueUp(result.name);
       } else {
-        anyFailure = true;
         failureCount++;
-        sqsExporterQueueUp.set({ queueName }, 0);
-        sqsApproximateNumberOfMessagesVisible.set({ queueName }, 0);
-        sqsApproximateNumberOfMessagesNotVisible.set({ queueName }, 0);
-        sqsApproximateNumberOfMessagesDelayed.set({ queueName }, 0);
-        if (queueState[queueName] === 'UP') {
-          console.error(`Queue "${queueName}" transitioned UP -> DOWN: ${result.reason.message}`);
-          queueState[queueName] = 'DOWN';
-        } else if (!queueState[queueName]) {
-          console.error(`Queue "${queueName}" is DOWN: ${result.reason.message}`);
-          queueState[queueName] = 'DOWN';
-        }
+        markQueueDown(result.name, result.reason, refreshStart);
       }
     });
 
-    if (anySuccess) {
+    if (successCount > 0) {
       consecutiveFailures = 0;
       ready = true;
     }
 
-    if (anyFailure && !anySuccess) {
+    if (failureCount > 0 && successCount === 0) {
       consecutiveFailures++;
       sqsExporterRefreshFailuresTotal.inc();
     }
@@ -378,7 +437,7 @@ async function refreshOnce() {
     const refreshDuration = (Date.now() - refreshStart) / 1000;
     sqsExporterRefreshDurationSeconds.set(refreshDuration);
 
-    if (anySuccess) {
+    if (successCount > 0) {
       sqsExporterLastRefreshTimestamp.set(Date.now() / 1000);
     }
   } finally {
@@ -386,45 +445,108 @@ async function refreshOnce() {
   }
 }
 
+// Queues worth asking CloudWatch about: currently UP, in the exporter's own
+// region, and holding messages (an empty queue cannot be stalled, so querying
+// it would only add to the CloudWatch bill).
+function getCloudWatchCandidates() {
+  const cfg = getConfig();
+  return getMonitoredQueueNames().filter((queueName) => {
+    const snapshot = queueSnapshot[queueName];
+    if (!snapshot || !queueState[queueName] || queueState[queueName].state !== 'UP') {
+      return false;
+    }
+    const region = parseRegionFromQueueUrl(snapshot.url);
+    if (region && region !== cfg.awsRegion) {
+      return false;
+    }
+    return snapshot.visible + snapshot.notVisible > 0;
+  });
+}
+
+function getCloudWatchWindow(nowMs, delaySeconds) {
+  // Align to whole minutes and stay `delaySeconds` behind real time so every
+  // bucket in the window is complete; CloudWatch ingests SQS metrics with a lag.
+  const endMs = Math.floor((nowMs - delaySeconds * 1000) / 60000) * 60000;
+  return {
+    startTime: new Date(endMs - CW_WINDOW_SECONDS * 1000),
+    endTime: new Date(endMs)
+  };
+}
+
+async function fetchDeletedCounts(queueNames, window) {
+  const queries = queueNames.map((queueName, index) => ({
+    Id: `q${index}`,
+    MetricStat: {
+      Metric: {
+        Namespace: CW_NAMESPACE,
+        MetricName: CW_METRIC_NAME,
+        Dimensions: [{ Name: 'QueueName', Value: queueName }]
+      },
+      Period: CW_PERIOD_SECONDS,
+      Stat: 'Sum'
+    },
+    ReturnData: true
+  }));
+
+  sqsExporterCloudWatchMetricsRequestedTotal.inc(queries.length);
+
+  const valuesById = {};
+  let nextToken;
+  do {
+    const command = new GetMetricDataCommand({
+      MetricDataQueries: queries,
+      StartTime: window.startTime,
+      EndTime: window.endTime,
+      NextToken: nextToken
+    });
+    const data = await sendTracked(cloudwatch, command, 'GetMetricData');
+    (data.MetricDataResults || []).forEach((result) => {
+      valuesById[result.Id] = (valuesById[result.Id] || []).concat(result.Values || []);
+    });
+    nextToken = data.NextToken;
+  } while (nextToken);
+
+  return queueNames.map((queueName, index) => ({ queueName, values: valuesById[`q${index}`] || [] }));
+}
+
 async function refreshCloudWatchMetrics() {
   const cfg = getConfig();
-  if (!cfg || !cfg.cwMetricsEnabled) return;
-  if (!cloudwatch) return;
+  if (!cfg || !cfg.cwMetricsEnabled || !cloudwatch || cwRefreshing) {
+    return;
+  }
 
+  cwRefreshing = true;
   try {
-    const queueNames = getMonitoredQueueNames();
-    if (queueNames.length === 0) return;
+    const candidates = getCloudWatchCandidates();
+    const candidateSet = new Set(candidates);
+    getMonitoredQueueNames()
+      .filter((queueName) => !candidateSet.has(queueName))
+      .forEach((queueName) => sqsMessagesDeletedLast5m.remove({ queueName }));
 
-    const endTime = new Date();
-    // Query two periods back to absorb CloudWatch's ~1-2 minute metric delay.
-    const lookbackMs = cfg.cwMetricsPeriodSeconds * 2 * 1000;
-    const startTime = new Date(endTime.getTime() - lookbackMs);
+    const window = getCloudWatchWindow(Date.now(), cfg.cwMetricsDelaySeconds);
 
-    for (const queueName of queueNames) {
+    for (let i = 0; i < candidates.length; i += CW_MAX_QUERIES_PER_REQUEST) {
+      const batch = candidates.slice(i, i + CW_MAX_QUERIES_PER_REQUEST);
       try {
-        const command = new GetMetricStatisticsCommand({
-          Namespace: cfg.cwMetricsNamespace,
-          MetricName: cfg.cwMetricsMetricName,
-          Dimensions: [{ Name: 'QueueName', Value: queueName }],
-          StartTime: startTime,
-          EndTime: endTime,
-          Period: cfg.cwMetricsPeriodSeconds,
-          Statistics: [cfg.cwMetricsStatistic]
+        const results = await fetchDeletedCounts(batch, window);
+        results.forEach(({ queueName, values }) => {
+          if (values.length === 0) {
+            // No datapoints means "unknown" (e.g. a queue in another account),
+            // not "zero deletions" - don't let it trigger a stall alert.
+            sqsMessagesDeletedLast5m.remove({ queueName });
+            return;
+          }
+          sqsMessagesDeletedLast5m.set({ queueName }, values.reduce((sum, v) => sum + v, 0));
         });
-        const data = await cloudwatch.send(command);
-        const datapoints = (data.Datapoints || [])
-          .sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
-        const statisticValue = cfg.cwMetricsStatistic;
-        const latestValue = datapoints.length > 0 ? (datapoints[0][statisticValue] || 0) : 0;
-        sqsMessagesDeletedLast5m.set({ queueName }, latestValue);
       } catch (error) {
-        // Gracefully skip queues where CloudWatch calls fail
-        // (e.g., missing IAM permissions for cloudwatch:GetMetricStatistics)
-        console.warn(`CloudWatch metric for queue "${queueName}" skipped: ${error.message}`);
+        // e.g. missing cloudwatch:GetMetricData permission. Drop the series so a
+        // stale value can't mask a stall, and log once per batch, not per queue.
+        batch.forEach((queueName) => sqsMessagesDeletedLast5m.remove({ queueName }));
+        console.warn(`CloudWatch GetMetricData failed for ${batch.length} queue(s): ${error.message}`);
       }
     }
-  } catch (error) {
-    console.warn(`CloudWatch refresh cycle failed: ${error.message}`);
+  } finally {
+    cwRefreshing = false;
   }
 }
 
@@ -462,13 +584,12 @@ function scheduleCloudWatchRefresh() {
   const cfg = getConfig();
   if (!cfg || !cfg.cwMetricsEnabled) return;
 
-  const interval = cfg.cwMetricsRefreshIntervalMs;
   cwRefreshTimer = setTimeout(async () => {
     try {
       await refreshCloudWatchMetrics();
     } catch (_) {}
     scheduleCloudWatchRefresh();
-  }, interval);
+  }, cfg.cwMetricsRefreshIntervalMs);
 }
 
 function stopCloudWatchRefresh() {
@@ -512,7 +633,9 @@ app.use((error, req, res, next) => {
 async function startServer() {
   validateRuntimeConfiguration();
   sqs = new SQSClient(getConfig().sqsConfig);
-  cloudwatch = new CloudWatchClient(getConfig().cloudWatchConfig);
+  if (getConfig().cwMetricsEnabled) {
+    cloudwatch = new CloudWatchClient(getConfig().cloudWatchConfig);
+  }
 
   return new Promise((resolve) => {
     server = app.listen(getConfig().port, () => {
@@ -574,6 +697,8 @@ function stopServer() {
       shuttingDown = false;
       Object.keys(queueState).forEach((k) => delete queueState[k]);
       Object.keys(queueUrlCache).forEach((k) => delete queueUrlCache[k]);
+      Object.keys(queueSnapshot).forEach((k) => delete queueSnapshot[k]);
+      monitoredQueueNames = new Set();
       discoveredQueueUrls = [];
       discoveryTimestamp = 0;
       resolve();
@@ -597,6 +722,7 @@ module.exports = {
   scheduleCloudWatchRefresh,
   stopCloudWatchRefresh,
   getMonitoredQueueNames,
+  getCloudWatchWindow,
   getBackoffDelay,
   getConfig,
   gracefulShutdown
@@ -616,6 +742,7 @@ if (require.main === module) {
       console.log('Initial refresh completed successfully');
       scheduleRefresh();
       if (getConfig().cwMetricsEnabled) {
+        await refreshCloudWatchMetrics();
         scheduleCloudWatchRefresh();
       }
     })

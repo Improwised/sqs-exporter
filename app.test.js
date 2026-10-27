@@ -39,13 +39,13 @@ jest.mock('@aws-sdk/client-cloudwatch', () => {
     }
   }
 
-  class GetMetricStatisticsCommand {
+  class GetMetricDataCommand {
     constructor(input) {
       this.input = input;
     }
   }
 
-  return { CloudWatchClient, GetMetricStatisticsCommand };
+  return { CloudWatchClient, GetMetricDataCommand };
 });
 
 const originalEnv = process.env;
@@ -88,10 +88,9 @@ beforeEach(() => {
   delete process.env.SQS_MAX_DISCOVERED_QUEUES;
   delete process.env.CW_METRICS_ENABLED;
   delete process.env.CW_METRICS_REFRESH_INTERVAL_MS;
-  delete process.env.CW_METRICS_NAMESPACE;
-  delete process.env.CW_METRICS_METRIC_NAME;
-  delete process.env.CW_METRICS_PERIOD_SECONDS;
-  delete process.env.CW_METRICS_STATISTIC;
+  delete process.env.CW_METRICS_DELAY_SECONDS;
+  delete process.env.SQS_QUEUE_URLS;
+  delete process.env.SQS_MAX_CONCURRENCY;
 });
 
 afterAll(() => {
@@ -399,7 +398,7 @@ describe('per-queue failure isolation', () => {
     await stopServer();
   });
 
-  it('zeros out stale metrics for failed queues', async () => {
+  it('drops stale metrics for failed queues instead of reporting zero', async () => {
     process.env.SQS_QUEUES = 'queue-failing';
 
     mockSend.mockImplementation(async (command) => {
@@ -426,7 +425,8 @@ describe('per-queue failure isolation', () => {
     await refreshOnce();
 
     response = await request(app).get('/metrics');
-    expect(response.text).toContain('sqs_approximate_number_of_messages{queueName="queue-failing"} 0');
+    expect(response.text).not.toContain('sqs_approximate_number_of_messages{queueName="queue-failing"}');
+    expect(response.text).toContain('sqs_exporter_queue_up{queueName="queue-failing"} 0');
 
     await stopServer();
   });
@@ -964,15 +964,206 @@ describe('FIFO in-flight groups metric', () => {
   });
 });
 
+describe('per-queue backoff', () => {
+  it('retries a failed queue on the next cycle, then skips cycles after repeated failures', async () => {
+    process.env.SQS_QUEUES = 'queue-good,queue-bad';
+
+    const attributeCalls = { 'queue-good': 0, 'queue-bad': 0 };
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueName) {
+        return { QueueUrl: `https://example.com/${command.input.QueueName}` };
+      }
+      const queueName = command.input.QueueUrl.split('/').pop();
+      attributeCalls[queueName]++;
+      if (queueName === 'queue-bad') {
+        throw new Error('Access denied');
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '1',
+          ApproximateNumberOfMessagesNotVisible: '0',
+          ApproximateNumberOfMessagesDelayed: '0'
+        }
+      };
+    });
+
+    const { startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshOnce();
+    await refreshOnce();
+    await refreshOnce();
+
+    expect(attributeCalls['queue-good']).toBe(4);
+    // 1st failure retries immediately; 2nd failure starts skipping cycles.
+    expect(attributeCalls['queue-bad']).toBe(2);
+
+    await stopServer();
+  });
+
+  it('does not invalidate the cached queue URL on non-missing-queue errors', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+
+    mockSuccessfulSqs();
+
+    const { startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    const throttled = new Error('Rate exceeded');
+    throttled.name = 'ThrottlingException';
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueUrl) {
+        throw throttled;
+      }
+      return { QueueUrl: 'https://example.com/queue-a' };
+    });
+    await refreshOnce();
+
+    mockSuccessfulSqs();
+    mockSend.mockClear();
+    await refreshOnce();
+
+    const queueUrlCalls = mockSend.mock.calls.filter((c) => c[0].input.QueueName);
+    expect(queueUrlCalls.length).toBe(0);
+
+    await stopServer();
+  });
+});
+
+describe('removed queues', () => {
+  it('drops all series for discovered queues that disappear', async () => {
+    process.env.SQS_QUEUES = 'orders-*';
+    process.env.SQS_DISCOVERY_TTL_MS = '1';
+
+    let queueUrls = [
+      'https://sqs.us-west-2.amazonaws.com/123/orders-1',
+      'https://sqs.us-west-2.amazonaws.com/123/orders-2'
+    ];
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueNamePrefix !== undefined) {
+        return { QueueUrls: queueUrls };
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '1',
+          ApproximateNumberOfMessagesNotVisible: '0',
+          ApproximateNumberOfMessagesDelayed: '0'
+        }
+      };
+    });
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    let response = await request(app).get('/metrics');
+    expect(response.text).toContain('queueName="orders-2"');
+
+    queueUrls = ['https://sqs.us-west-2.amazonaws.com/123/orders-1'];
+    await new Promise((r) => setTimeout(r, 5));
+    await refreshOnce();
+
+    response = await request(app).get('/metrics');
+    expect(response.text).toContain('queueName="orders-1"');
+    expect(response.text).not.toContain('queueName="orders-2"');
+
+    await stopServer();
+  });
+
+  it('keeps previously discovered queues when ListQueues fails', async () => {
+    process.env.SQS_QUEUES = 'orders-*';
+    process.env.SQS_DISCOVERY_TTL_MS = '1';
+
+    let listQueuesFails = false;
+    mockSend.mockImplementation(async (command) => {
+      if (command.input.QueueNamePrefix !== undefined) {
+        if (listQueuesFails) {
+          throw new Error('Rate exceeded');
+        }
+        return { QueueUrls: ['https://sqs.us-west-2.amazonaws.com/123/orders-1'] };
+      }
+      return {
+        Attributes: {
+          ApproximateNumberOfMessages: '1',
+          ApproximateNumberOfMessagesNotVisible: '0',
+          ApproximateNumberOfMessagesDelayed: '0'
+        }
+      };
+    });
+
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+
+    listQueuesFails = true;
+    await new Promise((r) => setTimeout(r, 5));
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_approximate_number_of_messages{queueName="orders-1"} 1');
+
+    consoleSpy.mockRestore();
+    await stopServer();
+  });
+});
+
+describe('AWS request accounting', () => {
+  it('counts AWS API requests by api and result', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+
+    mockSuccessfulSqs();
+
+    const { app, startServer, stopServer, refreshOnce } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshOnce();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_exporter_aws_requests_total{api="GetQueueUrl",result="success"} 1');
+    expect(response.text).toContain('sqs_exporter_aws_requests_total{api="GetQueueAttributes",result="success"} 2');
+
+    await stopServer();
+  });
+});
+
+function mockSqsWithCounts(countsByQueue) {
+  mockSend.mockImplementation(async (command) => {
+    if (command.input.QueueNamePrefix !== undefined) {
+      return { QueueUrls: [] };
+    }
+    if (command.input.QueueName) {
+      return { QueueUrl: `https://sqs.us-west-2.amazonaws.com/123/${command.input.QueueName}` };
+    }
+    const queueName = command.input.QueueUrl.split('/').pop();
+    const [visible, notVisible] = countsByQueue[queueName] || [0, 0];
+    return {
+      Attributes: {
+        ApproximateNumberOfMessages: String(visible),
+        ApproximateNumberOfMessagesNotVisible: String(notVisible),
+        ApproximateNumberOfMessagesDelayed: '0'
+      }
+    };
+  });
+}
+
+function mockCloudWatchValues(valuesByQueue) {
+  mockCloudWatchSend.mockImplementation(async (command) => ({
+    MetricDataResults: command.input.MetricDataQueries.map((q) => ({
+      Id: q.Id,
+      Values: valuesByQueue[q.MetricStat.Metric.Dimensions[0].Value] || []
+    }))
+  }));
+}
+
 describe('CloudWatch deletions metric', () => {
-  it('exposes sqs_messages_deleted_last_5m when CW_METRICS_ENABLED=true', async () => {
+  it('exposes the sum of 1-minute buckets as sqs_messages_deleted_last_5m', async () => {
     process.env.SQS_QUEUES = 'queue-a';
     process.env.CW_METRICS_ENABLED = 'true';
 
-    mockSuccessfulSqs();
-    mockCloudWatchSend.mockImplementation(async () => ({
-      Datapoints: [{ Timestamp: new Date(), Sum: 42 }]
-    }));
+    mockSqsWithCounts({ 'queue-a': [10, 0] });
+    mockCloudWatchValues({ 'queue-a': [10, 12, 0, 20] });
 
     const { app, startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
     await startServer();
@@ -980,19 +1171,89 @@ describe('CloudWatch deletions metric', () => {
     await refreshCloudWatchMetrics();
 
     const response = await request(app).get('/metrics');
-    expect(response.statusCode).toBe(200);
     expect(response.text).toContain('sqs_messages_deleted_last_5m{queueName="queue-a"} 42');
 
     await stopServer();
   });
 
-  it('queries CloudWatch with the expected parameters', async () => {
-    process.env.SQS_QUEUES = 'queue-a';
+  it('batches all queues into one GetMetricData request with 1-minute Sum queries', async () => {
+    process.env.SQS_QUEUES = 'queue-a,queue-b';
     process.env.CW_METRICS_ENABLED = 'true';
 
-    mockSuccessfulSqs();
-    mockCloudWatchSend.mockImplementation(async () => ({
-      Datapoints: [{ Timestamp: new Date(), Sum: 7 }]
+    mockSqsWithCounts({ 'queue-a': [5, 0], 'queue-b': [0, 3] });
+    mockCloudWatchValues({});
+
+    const { startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    expect(mockCloudWatchSend).toHaveBeenCalledTimes(1);
+    const queries = mockCloudWatchSend.mock.calls[0][0].input.MetricDataQueries;
+    expect(queries.map((q) => q.MetricStat.Metric.Dimensions[0].Value)).toEqual(['queue-a', 'queue-b']);
+    expect(queries[0].MetricStat).toEqual({
+      Metric: {
+        Namespace: 'AWS/SQS',
+        MetricName: 'NumberOfMessagesDeleted',
+        Dimensions: [{ Name: 'QueueName', Value: 'queue-a' }]
+      },
+      Period: 60,
+      Stat: 'Sum'
+    });
+
+    await stopServer();
+  });
+
+  it('only queries queues that hold messages', async () => {
+    process.env.SQS_QUEUES = 'busy,idle';
+    process.env.CW_METRICS_ENABLED = 'true';
+
+    mockSqsWithCounts({ busy: [3, 1], idle: [0, 0] });
+    mockCloudWatchValues({ busy: [1] });
+
+    const { app, startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    const queries = mockCloudWatchSend.mock.calls[0][0].input.MetricDataQueries;
+    expect(queries.map((q) => q.MetricStat.Metric.Dimensions[0].Value)).toEqual(['busy']);
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_messages_deleted_last_5m{queueName="busy"} 1');
+    expect(response.text).not.toContain('sqs_messages_deleted_last_5m{queueName="idle"}');
+    expect(response.text).toContain('sqs_exporter_cloudwatch_metrics_requested_total 1');
+
+    await stopServer();
+  });
+
+  it('does not call CloudWatch when every queue is empty', async () => {
+    process.env.SQS_QUEUES = 'idle';
+    process.env.CW_METRICS_ENABLED = 'true';
+
+    mockSqsWithCounts({ idle: [0, 0] });
+
+    const { startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    expect(mockCloudWatchSend).not.toHaveBeenCalled();
+
+    await stopServer();
+  });
+
+  it('skips queues in a different region than AWS_REGION', async () => {
+    process.env.SQS_QUEUE_URLS = 'https://sqs.eu-west-1.amazonaws.com/123/remote-queue';
+    process.env.CW_METRICS_ENABLED = 'true';
+    delete process.env.SQS_QUEUES;
+
+    mockSend.mockImplementation(async () => ({
+      Attributes: {
+        ApproximateNumberOfMessages: '5',
+        ApproximateNumberOfMessagesNotVisible: '0',
+        ApproximateNumberOfMessagesDelayed: '0'
+      }
     }));
 
     const { startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
@@ -1000,51 +1261,59 @@ describe('CloudWatch deletions metric', () => {
     await refreshOnce();
     await refreshCloudWatchMetrics();
 
-    const command = mockCloudWatchSend.mock.calls[0][0];
-    expect(command.input.Namespace).toBe('AWS/SQS');
-    expect(command.input.MetricName).toBe('NumberOfMessagesDeleted');
-    expect(command.input.Dimensions).toEqual([{ Name: 'QueueName', Value: 'queue-a' }]);
-    expect(command.input.Period).toBe(300);
-    expect(command.input.Statistics).toEqual(['Sum']);
+    expect(mockCloudWatchSend).not.toHaveBeenCalled();
 
     await stopServer();
   });
 
-  it('uses CloudWatch parameters from environment variables', async () => {
-    process.env.SQS_QUEUES = 'queue-a';
+  it('splits more than 500 queues across GetMetricData requests', async () => {
+    const names = Array.from({ length: 501 }, (_, i) => `q-${i}`);
+    process.env.SQS_QUEUES = names.join(',');
+    process.env.SQS_MAX_CONCURRENCY = '50';
     process.env.CW_METRICS_ENABLED = 'true';
-    process.env.CW_METRICS_NAMESPACE = 'Custom/Namespace';
-    process.env.CW_METRICS_METRIC_NAME = 'CustomMetric';
-    process.env.CW_METRICS_PERIOD_SECONDS = '60';
-    process.env.CW_METRICS_STATISTIC = 'Average';
 
-    mockSuccessfulSqs();
-    mockCloudWatchSend.mockImplementation(async () => ({
-      Datapoints: [{ Timestamp: new Date(), Average: 3.5 }]
-    }));
+    mockSqsWithCounts(Object.fromEntries(names.map((n) => [n, [1, 0]])));
+    mockCloudWatchValues({});
 
     const { startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
     await startServer();
     await refreshOnce();
     await refreshCloudWatchMetrics();
 
-    const command = mockCloudWatchSend.mock.calls[0][0];
-    expect(command.input.Namespace).toBe('Custom/Namespace');
-    expect(command.input.MetricName).toBe('CustomMetric');
-    expect(command.input.Period).toBe(60);
-    expect(command.input.Statistics).toEqual(['Average']);
+    expect(mockCloudWatchSend).toHaveBeenCalledTimes(2);
+    expect(mockCloudWatchSend.mock.calls[0][0].input.MetricDataQueries).toHaveLength(500);
+    expect(mockCloudWatchSend.mock.calls[1][0].input.MetricDataQueries).toHaveLength(1);
 
     await stopServer();
   });
 
-  it('gracefully skips CloudWatch when IAM permissions are missing', async () => {
+  it('follows NextToken and merges values across pages', async () => {
     process.env.SQS_QUEUES = 'queue-a';
     process.env.CW_METRICS_ENABLED = 'true';
 
-    mockSuccessfulSqs();
-    mockCloudWatchSend.mockRejectedValue(new Error('AccessDenied: not authorized'));
+    mockSqsWithCounts({ 'queue-a': [1, 0] });
+    mockCloudWatchSend
+      .mockResolvedValueOnce({ MetricDataResults: [{ Id: 'q0', Values: [1, 2] }], NextToken: 'next' })
+      .mockResolvedValueOnce({ MetricDataResults: [{ Id: 'q0', Values: [3] }] });
 
-    const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const { app, startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    expect(mockCloudWatchSend.mock.calls[1][0].input.NextToken).toBe('next');
+    const response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_messages_deleted_last_5m{queueName="queue-a"} 6');
+
+    await stopServer();
+  });
+
+  it('reports no series (not zero) when CloudWatch returns no datapoints', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.CW_METRICS_ENABLED = 'true';
+
+    mockSqsWithCounts({ 'queue-a': [1, 0] });
+    mockCloudWatchValues({});
 
     const { app, startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
     await startServer();
@@ -1052,9 +1321,59 @@ describe('CloudWatch deletions metric', () => {
     await refreshCloudWatchMetrics();
 
     const response = await request(app).get('/metrics');
+    expect(response.text).not.toContain('sqs_messages_deleted_last_5m{queueName="queue-a"}');
+
+    await stopServer();
+  });
+
+  it('drops the previous value when CloudWatch fails, and logs once per batch', async () => {
+    process.env.SQS_QUEUES = 'queue-a,queue-b';
+    process.env.CW_METRICS_ENABLED = 'true';
+
+    mockSqsWithCounts({ 'queue-a': [1, 0], 'queue-b': [1, 0] });
+    mockCloudWatchValues({ 'queue-a': [7], 'queue-b': [8] });
+
+    const { app, startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    let response = await request(app).get('/metrics');
+    expect(response.text).toContain('sqs_messages_deleted_last_5m{queueName="queue-a"} 7');
+
+    const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    mockCloudWatchSend.mockRejectedValue(new Error('AccessDenied: not authorized'));
+    await refreshCloudWatchMetrics();
+
+    response = await request(app).get('/metrics');
     expect(response.statusCode).toBe(200);
+    expect(response.text).not.toContain('sqs_messages_deleted_last_5m{queueName="queue-a"}');
+    expect(response.text).toContain('sqs_exporter_aws_requests_total{api="GetMetricData",result="error"} 1');
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
 
     consoleSpy.mockRestore();
+    await stopServer();
+  });
+
+  it('drops the value once a queue drains', async () => {
+    process.env.SQS_QUEUES = 'queue-a';
+    process.env.CW_METRICS_ENABLED = 'true';
+
+    mockSqsWithCounts({ 'queue-a': [1, 0] });
+    mockCloudWatchValues({ 'queue-a': [4] });
+
+    const { app, startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
+    await startServer();
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    mockSqsWithCounts({ 'queue-a': [0, 0] });
+    await refreshOnce();
+    await refreshCloudWatchMetrics();
+
+    const response = await request(app).get('/metrics');
+    expect(response.text).not.toContain('sqs_messages_deleted_last_5m{queueName="queue-a"}');
+
     await stopServer();
   });
 
@@ -1074,28 +1393,27 @@ describe('CloudWatch deletions metric', () => {
 
     await stopServer();
   });
+});
 
-  it('takes the most recent datapoint when multiple are returned', async () => {
-    process.env.SQS_QUEUES = 'queue-a';
-    process.env.CW_METRICS_ENABLED = 'true';
+describe('getCloudWatchWindow', () => {
+  it('ends on a whole minute, delaySeconds behind now, spanning 5 minutes', () => {
+    const { getCloudWatchWindow } = loadApp();
+    const now = Date.parse('2026-10-25T12:07:42Z');
 
-    mockSuccessfulSqs();
-    mockCloudWatchSend.mockImplementation(async () => ({
-      Datapoints: [
-        { Timestamp: new Date('2026-10-25T00:00:00Z'), Sum: 100 },
-        { Timestamp: new Date('2026-10-25T00:05:00Z'), Sum: 200 }
-      ]
-    }));
+    const { startTime, endTime } = getCloudWatchWindow(now, 120);
 
-    const { app, startServer, stopServer, refreshOnce, refreshCloudWatchMetrics } = loadApp();
-    await startServer();
-    await refreshOnce();
-    await refreshCloudWatchMetrics();
+    expect(endTime.toISOString()).toBe('2026-10-25T12:05:00.000Z');
+    expect(startTime.toISOString()).toBe('2026-10-25T12:00:00.000Z');
+  });
 
-    const response = await request(app).get('/metrics');
-    expect(response.text).toContain('sqs_messages_deleted_last_5m{queueName="queue-a"} 200');
+  it('stays aligned to whole minutes when the delay is not a multiple of 60', () => {
+    const { getCloudWatchWindow } = loadApp();
+    const now = Date.parse('2026-10-25T12:07:42Z');
 
-    await stopServer();
+    const { startTime, endTime } = getCloudWatchWindow(now, 90);
+
+    expect(endTime.toISOString()).toBe('2026-10-25T12:06:00.000Z');
+    expect(startTime.toISOString()).toBe('2026-10-25T12:01:00.000Z');
   });
 });
 

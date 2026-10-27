@@ -35,7 +35,7 @@ describe('loadConfig', () => {
     const config = loadConfig();
 
     expect(config.port).toBe(3001);
-    expect(config.refreshIntervalMs).toBe(15000);
+    expect(config.refreshIntervalMs).toBe(60000);
   });
 
   it('throws on empty SQS_QUEUES', () => {
@@ -311,44 +311,32 @@ describe('loadConfig', () => {
     expect(() => loadConfig()).toThrow('CW_METRICS_REFRESH_INTERVAL_MS must be a positive integer');
   });
 
-  it('defaults CloudWatch namespace, metric name, period and statistic', () => {
+  it('defaults CW_METRICS_DELAY_SECONDS to 120', () => {
     process.env.SQS_QUEUES = 'queue-a';
     process.env.AWS_REGION = 'us-west-2';
-    delete process.env.CW_METRICS_NAMESPACE;
-    delete process.env.CW_METRICS_METRIC_NAME;
-    delete process.env.CW_METRICS_PERIOD_SECONDS;
-    delete process.env.CW_METRICS_STATISTIC;
+    delete process.env.CW_METRICS_DELAY_SECONDS;
 
     const config = loadConfig();
 
-    expect(config.cwMetricsNamespace).toBe('AWS/SQS');
-    expect(config.cwMetricsMetricName).toBe('NumberOfMessagesDeleted');
-    expect(config.cwMetricsPeriodSeconds).toBe(300);
-    expect(config.cwMetricsStatistic).toBe('Sum');
+    expect(config.cwMetricsDelaySeconds).toBe(120);
   });
 
-  it('reads CloudWatch parameters from environment', () => {
+  it('reads CW_METRICS_DELAY_SECONDS from environment', () => {
     process.env.SQS_QUEUES = 'queue-a';
     process.env.AWS_REGION = 'us-west-2';
-    process.env.CW_METRICS_NAMESPACE = 'Custom/Namespace';
-    process.env.CW_METRICS_METRIC_NAME = 'CustomMetric';
-    process.env.CW_METRICS_PERIOD_SECONDS = '60';
-    process.env.CW_METRICS_STATISTIC = 'Average';
+    process.env.CW_METRICS_DELAY_SECONDS = '300';
 
     const config = loadConfig();
 
-    expect(config.cwMetricsNamespace).toBe('Custom/Namespace');
-    expect(config.cwMetricsMetricName).toBe('CustomMetric');
-    expect(config.cwMetricsPeriodSeconds).toBe(60);
-    expect(config.cwMetricsStatistic).toBe('Average');
+    expect(config.cwMetricsDelaySeconds).toBe(300);
   });
 
-  it('throws on zero CW_METRICS_PERIOD_SECONDS', () => {
+  it('throws on zero CW_METRICS_DELAY_SECONDS', () => {
     process.env.SQS_QUEUES = 'queue-a';
     process.env.AWS_REGION = 'us-west-2';
-    process.env.CW_METRICS_PERIOD_SECONDS = '0';
+    process.env.CW_METRICS_DELAY_SECONDS = '0';
 
-    expect(() => loadConfig()).toThrow('CW_METRICS_PERIOD_SECONDS must be a positive integer');
+    expect(() => loadConfig()).toThrow('CW_METRICS_DELAY_SECONDS must be a positive integer');
   });
 
   it('shares fromIni credentials between sqsConfig and cloudWatchConfig', () => {
