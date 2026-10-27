@@ -74,7 +74,7 @@ function loadConfig() {
 
   const port = validatePositiveInt(process.env.PORT || 3001, 'PORT');
   const refreshIntervalMs = validatePositiveInt(
-    process.env.METRICS_REFRESH_INTERVAL_MS || 15000,
+    process.env.METRICS_REFRESH_INTERVAL_MS || 60000,
     'METRICS_REFRESH_INTERVAL_MS'
   );
 
@@ -100,13 +100,10 @@ function loadConfig() {
     process.env.CW_METRICS_REFRESH_INTERVAL_MS || 300000,
     'CW_METRICS_REFRESH_INTERVAL_MS'
   );
-  const cwMetricsNamespace = process.env.CW_METRICS_NAMESPACE || 'AWS/SQS';
-  const cwMetricsMetricName = process.env.CW_METRICS_METRIC_NAME || 'NumberOfMessagesDeleted';
-  const cwMetricsPeriodSeconds = validatePositiveInt(
-    process.env.CW_METRICS_PERIOD_SECONDS || 300,
-    'CW_METRICS_PERIOD_SECONDS'
+  const cwMetricsDelaySeconds = validatePositiveInt(
+    process.env.CW_METRICS_DELAY_SECONDS || 120,
+    'CW_METRICS_DELAY_SECONDS'
   );
-  const cwMetricsStatistic = process.env.CW_METRICS_STATISTIC || 'Sum';
 
   // Resolve credentials once and share them across AWS clients so that
   // the SQS client and the CloudWatch client authenticate identically.
@@ -141,10 +138,7 @@ function loadConfig() {
     maxDiscoveredQueues,
     cwMetricsEnabled,
     cwMetricsRefreshIntervalMs,
-    cwMetricsNamespace,
-    cwMetricsMetricName,
-    cwMetricsPeriodSeconds,
-    cwMetricsStatistic,
+    cwMetricsDelaySeconds,
     sqsConfig,
     cloudWatchConfig
   });
