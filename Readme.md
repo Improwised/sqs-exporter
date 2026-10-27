@@ -15,7 +15,7 @@ When a queue cannot be read, its message-count series are removed (not set to `0
 
 ## Requirements
 
-- Node.js 22+ (the AWS SDK requires 20+; Node 18 and 20 are end-of-life)
+- Node.js 24+ (CI tests Node 24 and 26; the Docker image uses Node 26)
 - Access to AWS SQS with permission to call:
   - `sqs:GetQueueUrl`
   - `sqs:GetQueueAttributes`
